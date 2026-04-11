@@ -61,7 +61,6 @@ def load_cotton(path):
     df = df[df["category"].isin(CATS)].copy()
     print(f"    Total rows: {len(df)}")
     print(f"    Geographies: {sorted(df['geography'].unique())}")
-    print(f"    Years: {int(df['mkt_year'].min())}-{int(df['mkt_year'].max())}")
     
     pivot = df.pivot_table(
         index=["geography", "mkt_year"], columns="category",
@@ -263,31 +262,49 @@ def best_prediction(wk, mo, cu):
     return best
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. PRODUCTION DATA (WITH DEBUG OUTPUT)
+# 3. PRODUCTION DATA (FIXED - SKIPS STATES WITH MISSING DATA)
 # ═══════════════════════════════════════════════════════════════════════════
 def build_production(cotton, best_tx):
     max_yr = int(cotton["mkt_year"].max())
     print(f"\n    Building production for year {max_yr}...")
     
-    state_data = {}
+    # Get ALL states (excluding US total)
     all_states = [g for g in cotton["geography"].unique() if g != US_GEO]
     print(f"    Found {len(all_states)} states: {all_states}")
+    
+    # Build state data, skipping states with missing data
+    state_data = {}
+    skipped_states = []
     
     for state in all_states:
         sdf = cotton[cotton["geography"] == state].copy()
         sdf = sdf[sdf["mkt_year"] <= max_yr].sort_values("mkt_year")
+        
         if sdf.empty: 
-            print(f"      {state}: SKIPPED (empty)")
+            skipped_states.append(f"{state}: empty")
             continue
         
-        print(f"      {state}: {len(sdf)} rows")
+        # Check if this state has abandonment data
+        if "abandonment" not in sdf.columns or sdf["abandonment"].isna().all():
+            skipped_states.append(f"{state}: no abandonment")
+            continue
+        
+        # Check if we have yield and planted data
+        if "upland_cotton_lint_yield" not in sdf.columns or sdf["upland_cotton_lint_yield"].isna().all():
+            skipped_states.append(f"{state}: no yield")
+            continue
+            
+        if "upland_cotton_planted_acreage" not in sdf.columns or sdf["upland_cotton_planted_acreage"].isna().all():
+            skipped_states.append(f"{state}: no planted")
+            continue
+        
+        print(f"      {state}: {len(sdf)} rows - INCLUDING")
         sd = {"periods": {}}
         
         for P in PERIODS:
             rec = sdf[sdf["mkt_year"] >= max_yr - P + 1]
             if rec.empty: 
                 sd["periods"][P] = None
-                print(f"        {P}yr: No data")
                 continue
             
             def g(col):
@@ -301,7 +318,6 @@ def build_production(cotton, best_tx):
                 "yld": g("upland_cotton_lint_yield"), 
                 "plt": g("upland_cotton_planted_acreage")
             }
-            print(f"        {P}yr: ab={sd['periods'][P]['ab']}, yld={sd['periods'][P]['yld']}, plt={sd['periods'][P]['plt']}")
         
         lr = sdf.iloc[-1]
         sd["last_yr_actual"] = {
@@ -310,63 +326,69 @@ def build_production(cotton, best_tx):
         }
         state_data[state] = sd
     
-    # Build matrices
+    print(f"\n    Skipped: {', '.join(skipped_states) if skipped_states else 'None'}")
+    print(f"    Using {len(state_data)} states: {list(state_data.keys())}")
+    
+    # Build matrices - use ONLY valid states
     matA, matB = {}, {}
     model_ab = best_tx.get("point")
-    print(f"\n    Building matrices (model_ab={model_ab})...")
+    print(f"\n    Building matrices (model_ab={model_ab:.4f})...")
     
     for P_ab in PERIODS:
         matA[P_ab], matB[P_ab] = {}, {}
         for P_yld in PERIODS:
-            total_a, total_b, ok = 0.0, 0.0, True
-            failed_states = []
+            total_a, total_b = 0.0, 0.0
+            valid_states = 0
             
             for st, sd in state_data.items():
                 pa, py = sd["periods"].get(P_ab), sd["periods"].get(P_yld)
                 
+                # Skip if this state doesn't have data for these periods
                 if not pa or not py: 
-                    ok = False
-                    failed_states.append(f"{st}:no_period_data")
-                    break
+                    continue
                 
                 ab_a = pa["ab"]
-                ab_b = model_ab if st == "TX" else pa["ab"]
                 yld = py["yld"]
                 plt = pa["plt"]
                 
-                if ab_a is None:
-                    ok = False
-                    failed_states.append(f"{st}:ab_a=None")
-                    break
-                if yld is None:
-                    ok = False
-                    failed_states.append(f"{st}:yld=None")
-                    break
-                if plt is None:
-                    ok = False
-                    failed_states.append(f"{st}:plt=None")
-                    break
+                # Skip if any value is missing
+                if ab_a is None or yld is None or plt is None:
+                    continue
+                
+                # For Matrix B: use TX model prediction for TX, historical for others
+                ab_b = model_ab if st == "TX" else ab_a
                 
                 prod_a = plt * 1000 * (1 - ab_a) * yld / 480_000_000
                 prod_b = plt * 1000 * (1 - ab_b) * yld / 480_000_000
+                
                 total_a += prod_a
                 total_b += prod_b
+                valid_states += 1
             
-            matA[P_ab][P_yld] = round(total_a, 3) if ok else None
-            matB[P_ab][P_yld] = round(total_b, 3) if ok else None
+            # Only store if we have at least some states (TX must be present)
+            has_tx = "TX" in state_data and state_data["TX"]["periods"].get(P_ab) and state_data["TX"]["periods"].get(P_yld)
             
-            if not ok:
-                print(f"      FAIL {PERIOD_LABELS[P_ab]}x{PERIOD_LABELS[P_yld]}: {', '.join(failed_states)}")
+            if valid_states > 0 and has_tx:
+                matA[P_ab][P_yld] = round(total_a, 3)
+                matB[P_ab][P_yld] = round(total_b, 3)
+                print(f"      OK   {PERIOD_LABELS[P_ab]}x{PERIOD_LABELS[P_yld]}: "
+                      f"A={matA[P_ab][P_yld]:.2f}, B={matB[P_ab][P_yld]:.2f} ({valid_states} states)")
             else:
-                print(f"      OK   {PERIOD_LABELS[P_ab]}x{PERIOD_LABELS[P_yld]}: A={matA[P_ab][P_yld]:.2f}, B={matB[P_ab][P_yld]:.2f}")
+                matA[P_ab][P_yld] = None
+                matB[P_ab][P_yld] = None
+                print(f"      SKIP {PERIOD_LABELS[P_ab]}x{PERIOD_LABELS[P_yld]}: "
+                      f"valid={valid_states}, has_tx={has_tx}")
     
-    # TX abandonment range
+    # TX abandonment range for sensitivity grid
     tx_hist = cotton[(cotton["geography"] == "TX") & (cotton["mkt_year"] >= max_yr - 9)]
     if not tx_hist.empty and "abandonment" in tx_hist.columns:
         ab_vals = tx_hist["abandonment"].dropna()
-        ab_lo = int(float(ab_vals.min()) * 20) / 20
-        ab_hi = (int(float(ab_vals.max()) * 20) + 1) / 20
-        tx_ab_range = [round(ab_lo + i * 0.05, 2) for i in range(int(round((ab_hi - ab_lo) / 0.05)) + 1)]
+        if len(ab_vals) > 0:
+            ab_lo = int(float(ab_vals.min()) * 20) / 20
+            ab_hi = (int(float(ab_vals.max()) * 20) + 1) / 20
+            tx_ab_range = [round(ab_lo + i * 0.05, 2) for i in range(int(round((ab_hi - ab_lo) / 0.05)) + 1)]
+        else:
+            tx_ab_range = [round(0.10 + i * 0.05, 2) for i in range(13)]
     else:
         tx_ab_range = [round(0.10 + i * 0.05, 2) for i in range(13)]
     
@@ -384,12 +406,13 @@ def build_production(cotton, best_tx):
 def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought):
     curr_yr = best_tx.get("curr_yr", "?")
     model_ab = best_tx.get("point")
+    states_used = len(prod.get('state_data', {}))
     return {
         "seasonality": f"Current season ({curr_yr}): {len(wk_rows)} weeks available.",
         "weekly": f"Weekly: Best {best_tx.get('variable','—')} R²={best_tx.get('r2',0)*100:.1f}%",
         "monthly": "Monthly: Averages weekly readings for stability.",
         "cumulative": "Cumulative: Running average from Apr W1.",
-        "production": f"TX abandonment: {(model_ab or 0)*100:.1f}% via {best_tx.get('model','—')}"
+        "production": f"TX abandonment: {(model_ab or 0)*100:.1f}% via {best_tx.get('model','—')} using {states_used} states"
     }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -427,7 +450,7 @@ td{{background:#0d1117}}
 <body>
 <div class="hdr"><h1>🌾 TX Cotton Drought Predictor · MY {curr_yr}</h1>
 <p>Best: {best_tx.get('variable','—')} R²={best_tx.get('r2',0)*100:.1f}% → TX abandonment {(best_tx.get('point') or 0)*100:.1f}%</p>
-<p>Matrices: {'✓ DATA PRESENT' if has_data else '✗ EMPTY - check debug output'}</p></div>
+<p>Matrices: {'✓ DATA PRESENT' if has_data else '✗ EMPTY - check console output'}</p></div>
 <div class="tabs">
 <div class="tab active" onclick="showTab('t1')">Weekly</div>
 <div class="tab" onclick="showTab('t2')">Monthly</div>
@@ -489,11 +512,11 @@ def main():
     print("\nBuilding production data...")
     prod = build_production(cotton, best_tx)
     
-    # Check what we got
-    print(f"\nProduction data summary:")
-    print(f"  States: {len(prod['state_data'])}")
-    print(f"  Matrix A keys: {list(prod['matA'].keys()) if prod['matA'] else 'None'}")
-    print(f"  Sample A[5yr][5yr]: {prod['matA'].get('5', {}).get('5', 'N/A') if prod['matA'] else 'N/A'}")
+    # Final check
+    print(f"\n{'='*70}")
+    print(f"FINAL CHECK:")
+    print(f"  States used: {len(prod['state_data'])}")
+    print(f"  Matrices built: {'YES' if any(v for p in prod['matA'].values() for v in p.values() if v is not None) else 'NO'}")
     
     summary = build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab_tx, drought_tx)
     
