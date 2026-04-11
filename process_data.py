@@ -33,8 +33,8 @@ MIN_TRAIN_YRS = 15            # minimum years before first prediction
 DROUGHT_VARS  = ["D1-D4", "D2-D4", "D3-D4", "D4"]
 SEASON_START  = 14            # ISO week ~ Apr W1
 SEASON_END    = 43            # ISO week ~ Oct W4
-COTTON_CSV    = Path("cotton_texas.csv")
-DROUGHT_CSV   = Path("drought_texas.csv")
+COTTON_CSV    = Path("data/cotton_texas.csv")
+DROUGHT_CSV   = Path("data/drought_texas.csv")
 OUTPUT_HTML   = Path("cotton_drought_dashboard.html")
 
 # ═══════════════════════════════════════════════════════════════════════════
