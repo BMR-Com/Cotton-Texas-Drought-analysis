@@ -2,16 +2,6 @@
 Texas Cotton Abandonment — Drought Predictor + Production Estimator
 ====================================================================
 Run:  python process_data.py
-
-Reads:
-    data/cotton_texas.csv  — USDA NASS cotton data (all states)
-    data/drought_texas.csv — USDA Drought Monitor weekly TX cotton area  
-    data/drought_US.csv    — USDA Drought Monitor weekly US cotton area
-
-Writes:
-    docs/index.html — self-contained dashboard (open in any browser)
-
-Install:  pip install numpy pandas scipy
 """
 
 import json, sys
@@ -37,9 +27,6 @@ ANALOG_TOP_N  = 5
 PERIODS       = [1, 5, 10, 15, 20]
 PERIOD_LABELS = {1:"1yr", 5:"5yr", 10:"10yr", 15:"15yr", 20:"20yr"}
 
-# ═══════════════════════════════════════════════════════════════════════════
-# HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
 def week_label(iw):
     ref = pd.Timestamp("2019-01-01") + pd.to_timedelta(int(iw)*7-4, unit="D")
     return f"{MONTH_NAMES.get(ref.month,'M'+str(ref.month))} W{(ref.day-1)//7+1}"
@@ -72,11 +59,16 @@ def load_cotton(path):
     CATS = ["upland_cotton_planted_acreage", "upland_cotton_harvested_acreage",
             "upland_cotton_lint_yield", "upland_cotton_production"]
     df = df[df["category"].isin(CATS)].copy()
-    print(f"    Found {len(df)} rows, {df['geography'].nunique()} geographies")
+    print(f"    Total rows: {len(df)}")
+    print(f"    Geographies: {sorted(df['geography'].unique())}")
+    print(f"    Years: {int(df['mkt_year'].min())}-{int(df['mkt_year'].max())}")
+    
     pivot = df.pivot_table(
         index=["geography", "mkt_year"], columns="category",
         values="value", aggfunc="first").reset_index()
     pivot.columns.name = None
+    
+    # Calculate abandonment
     has_plt = "upland_cotton_planted_acreage" in pivot.columns
     has_hvs = "upland_cotton_harvested_acreage" in pivot.columns
     if has_plt and has_hvs:
@@ -85,12 +77,16 @@ def load_cotton(path):
             1 - pivot.loc[mask, "upland_cotton_harvested_acreage"] / 
             pivot.loc[mask, "upland_cotton_planted_acreage"]).clip(0, 1)
         print(f"    Calculated abandonment for {mask.sum()} rows")
-    us_data = pivot[pivot["geography"] == US_GEO]
-    print(f"    US rows: {len(us_data)}, abandonment: {us_data['abandonment'].notna().sum()}")
+    
+    # Check each state
+    for geo in sorted(pivot["geography"].unique()):
+        sub = pivot[pivot["geography"] == geo]
+        ab_cnt = sub["abandonment"].notna().sum()
+        print(f"      {geo}: {len(sub)} rows, {ab_cnt} with abandonment")
+    
     return pivot
 
 def load_drought(path, geo_label="TX"):
-    """Load drought data with proper geo labeling."""
     print(f"  Loading drought data from {path} for {geo_label}...")
     if not path.exists():
         print(f"    WARNING: {path} not found!")
@@ -115,10 +111,9 @@ def load_drought(path, geo_label="TX"):
     return df
 
 def get_abandonment_series(cotton, geo):
-    """Extract abandonment series for a specific geography."""
     sub = cotton[cotton["geography"] == geo].copy()
     if sub.empty:
-        print(f"    WARNING: No data for geography '{geo}'")
+        print(f"    WARNING: No data for '{geo}'")
         return None
     sub = sub.set_index("mkt_year")
     if "abandonment" not in sub.columns:
@@ -268,61 +263,123 @@ def best_prediction(wk, mo, cu):
     return best
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. PRODUCTION DATA
+# 3. PRODUCTION DATA (WITH DEBUG OUTPUT)
 # ═══════════════════════════════════════════════════════════════════════════
 def build_production(cotton, best_tx):
     max_yr = int(cotton["mkt_year"].max())
+    print(f"\n    Building production for year {max_yr}...")
+    
     state_data = {}
     all_states = [g for g in cotton["geography"].unique() if g != US_GEO]
-    print(f"    States found: {all_states}")
+    print(f"    Found {len(all_states)} states: {all_states}")
+    
     for state in all_states:
         sdf = cotton[cotton["geography"] == state].copy()
         sdf = sdf[sdf["mkt_year"] <= max_yr].sort_values("mkt_year")
-        if sdf.empty: continue
+        if sdf.empty: 
+            print(f"      {state}: SKIPPED (empty)")
+            continue
+        
+        print(f"      {state}: {len(sdf)} rows")
         sd = {"periods": {}}
+        
         for P in PERIODS:
             rec = sdf[sdf["mkt_year"] >= max_yr - P + 1]
             if rec.empty: 
                 sd["periods"][P] = None
+                print(f"        {P}yr: No data")
                 continue
+            
             def g(col):
                 if col not in rec.columns: 
                     return None
                 v = rec[col].dropna()
                 return safe(float(v.mean()), 2) if len(v) else None
-            sd["periods"][P] = {"ab": g("abandonment"), "yld": g("upland_cotton_lint_yield"), 
-                               "plt": g("upland_cotton_planted_acreage")}
+            
+            sd["periods"][P] = {
+                "ab": g("abandonment"), 
+                "yld": g("upland_cotton_lint_yield"), 
+                "plt": g("upland_cotton_planted_acreage")
+            }
+            print(f"        {P}yr: ab={sd['periods'][P]['ab']}, yld={sd['periods'][P]['yld']}, plt={sd['periods'][P]['plt']}")
+        
         lr = sdf.iloc[-1]
-        sd["last_yr_actual"] = {"year": int(lr["mkt_year"]), 
-                               "plt": safe(lr.get("upland_cotton_planted_acreage"), 0)}
+        sd["last_yr_actual"] = {
+            "year": int(lr["mkt_year"]), 
+            "plt": safe(lr.get("upland_cotton_planted_acreage"), 0)
+        }
         state_data[state] = sd
+    
+    # Build matrices
     matA, matB = {}, {}
     model_ab = best_tx.get("point")
+    print(f"\n    Building matrices (model_ab={model_ab})...")
+    
     for P_ab in PERIODS:
         matA[P_ab], matB[P_ab] = {}, {}
         for P_yld in PERIODS:
             total_a, total_b, ok = 0.0, 0.0, True
+            failed_states = []
+            
             for st, sd in state_data.items():
                 pa, py = sd["periods"].get(P_ab), sd["periods"].get(P_yld)
+                
                 if not pa or not py: 
                     ok = False
+                    failed_states.append(f"{st}:no_period_data")
                     break
-                ab_a, ab_b, yld, plt = pa["ab"], (model_ab if st == "TX" else pa["ab"]), py["yld"], pa["plt"]
-                if ab_a is None or yld is None or plt is None: 
+                
+                ab_a = pa["ab"]
+                ab_b = model_ab if st == "TX" else pa["ab"]
+                yld = py["yld"]
+                plt = pa["plt"]
+                
+                if ab_a is None:
                     ok = False
+                    failed_states.append(f"{st}:ab_a=None")
                     break
-                total_a += plt * 1000 * (1 - ab_a) * yld / 480_000_000
-                total_b += plt * 1000 * (1 - ab_b) * yld / 480_000_000
+                if yld is None:
+                    ok = False
+                    failed_states.append(f"{st}:yld=None")
+                    break
+                if plt is None:
+                    ok = False
+                    failed_states.append(f"{st}:plt=None")
+                    break
+                
+                prod_a = plt * 1000 * (1 - ab_a) * yld / 480_000_000
+                prod_b = plt * 1000 * (1 - ab_b) * yld / 480_000_000
+                total_a += prod_a
+                total_b += prod_b
+            
             matA[P_ab][P_yld] = round(total_a, 3) if ok else None
             matB[P_ab][P_yld] = round(total_b, 3) if ok else None
+            
+            if not ok:
+                print(f"      FAIL {PERIOD_LABELS[P_ab]}x{PERIOD_LABELS[P_yld]}: {', '.join(failed_states)}")
+            else:
+                print(f"      OK   {PERIOD_LABELS[P_ab]}x{PERIOD_LABELS[P_yld]}: A={matA[P_ab][P_yld]:.2f}, B={matB[P_ab][P_yld]:.2f}")
+    
+    # TX abandonment range
     tx_hist = cotton[(cotton["geography"] == "TX") & (cotton["mkt_year"] >= max_yr - 9)]
-    ab_vals = tx_hist["abandonment"].dropna() if not tx_hist.empty and "abandonment" in tx_hist.columns else pd.Series([0.1, 0.6])
-    tx_ab_range = [round(int(float(ab_vals.min()) * 20) / 20 + i * 0.05, 2) for i in range(int(round(((int(float(ab_vals.max()) * 20) + 1) / 20 - int(float(ab_vals.min()) * 20) / 20) / 0.05)) + 1)]
-    return {"state_data": state_data, 
-            "matA": {str(k): {str(k2): v2 for k2, v2 in v.items()} for k, v in matA.items()},
-            "matB": {str(k): {str(k2): v2 for k2, v2 in v.items()} for k, v in matB.items()},
-            "tx_ab_range": tx_ab_range, "periods": PERIODS, 
-            "period_labels": PERIOD_LABELS, "max_yr": max_yr, "model_ab": model_ab}
+    if not tx_hist.empty and "abandonment" in tx_hist.columns:
+        ab_vals = tx_hist["abandonment"].dropna()
+        ab_lo = int(float(ab_vals.min()) * 20) / 20
+        ab_hi = (int(float(ab_vals.max()) * 20) + 1) / 20
+        tx_ab_range = [round(ab_lo + i * 0.05, 2) for i in range(int(round((ab_hi - ab_lo) / 0.05)) + 1)]
+    else:
+        tx_ab_range = [round(0.10 + i * 0.05, 2) for i in range(13)]
+    
+    return {
+        "state_data": state_data, 
+        "matA": {str(k): {str(k2): v2 for k2, v2 in v.items()} for k, v in matA.items()},
+        "matB": {str(k): {str(k2): v2 for k2, v2 in v.items()} for k, v in matB.items()},
+        "tx_ab_range": tx_ab_range, 
+        "periods": PERIODS, 
+        "period_labels": PERIOD_LABELS, 
+        "max_yr": max_yr, 
+        "model_ab": model_ab
+    }
 
 def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought):
     curr_yr = best_tx.get("curr_yr", "?")
@@ -342,6 +399,10 @@ def make_html(wk_rows, mo_rows, cu_rows, prod, best_tx, summary, ci_pct):
     curr_yr = wk_rows[0]["curr_yr"] if wk_rows else "?"
     j_wk, j_mo, j_cu = jd(wk_rows), jd(mo_rows), jd(cu_rows)
     j_prod, j_btx = jd(prod), jd(best_tx)
+    
+    # Check if matrices have data
+    has_data = any(v for p in prod.get('matA', {}).values() for v in p.values() if v is not None)
+    
     return f'''<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>TX Cotton Drought Predictor</title>
 <style>
@@ -360,10 +421,13 @@ th{{background:#0e1d2e;color:#7fb3d3}}
 td{{background:#0d1117}}
 .mat{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
 @media(max-width:700px){{.mat{{grid-template-columns:1fr}}}}
+.error{{color:#fc8181;padding:20px}}
+.success{{color:#68d391;padding:20px}}
 </style></head>
 <body>
 <div class="hdr"><h1>🌾 TX Cotton Drought Predictor · MY {curr_yr}</h1>
-<p>Best: {best_tx.get('variable','—')} R²={best_tx.get('r2',0)*100:.1f}% → TX abandonment {(best_tx.get('point') or 0)*100:.1f}%</p></div>
+<p>Best: {best_tx.get('variable','—')} R²={best_tx.get('r2',0)*100:.1f}% → TX abandonment {(best_tx.get('point') or 0)*100:.1f}%</p>
+<p>Matrices: {'✓ DATA PRESENT' if has_data else '✗ EMPTY - check debug output'}</p></div>
 <div class="tabs">
 <div class="tab active" onclick="showTab('t1')">Weekly</div>
 <div class="tab" onclick="showTab('t2')">Monthly</div>
@@ -381,7 +445,7 @@ td{{background:#0d1117}}
 <script>
 var WK={j_wk}, MO={j_mo}, CU={j_cu}, PROD={j_prod}, BTX={j_btx};
 function showTab(id){{document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById(id).classList.add('active');document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));event.target.classList.add('active');if(id==='t4')renderProd();}}
-function renderProd(){{var mA=document.getElementById('mA'),mB=document.getElementById('mB');if(mA&&PROD.matA){{var h='<table><tr><th>Ab↓ Yld→</th>'+PROD.periods.map(p=>'<th>'+PROD.period_labels[p]+'</th>').join('')+'</tr>';PROD.periods.forEach(pAb=>{{h+='<tr><th>'+PROD.period_labels[pAb]+'</th>'+PROD.periods.map(pYld=>'<td>'+(PROD.matA[pAb]&&PROD.matA[pAb][pYld]!==null?PROD.matA[pAb][pYld].toFixed(2):'—')+'</td>').join('')+'</tr>';}});h+='</table>';mA.innerHTML=h;}}if(mB&&PROD.matB){{var h='<table><tr><th>Ab↓ Yld→</th>'+PROD.periods.map(p=>'<th>'+PROD.period_labels[p]+'</th>').join('')+'</tr>';PROD.periods.forEach(pAb=>{{h+='<tr><th>'+PROD.period_labels[pAb]+'</th>'+PROD.periods.map(pYld=>'<td>'+(PROD.matB[pAb]&&PROD.matB[pAb][pYld]!==null?PROD.matB[pAb][pYld].toFixed(2):'—')+'</td>').join('')+'</tr>';}});h+='</table>';mB.innerHTML=h;}}}}
+function renderProd(){{var mA=document.getElementById('mA'),mB=document.getElementById('mB');if(!PROD.matA){{mA.innerHTML='<div class="error">No matrix data</div>';return;}}var h='<table><tr><th>Ab↓ Yld→</th>'+PROD.periods.map(p=>'<th>'+PROD.period_labels[p]+'</th>').join('')+'</tr>';PROD.periods.forEach(pAb=>{{h+='<tr><th>'+PROD.period_labels[pAb]+'</th>'+PROD.periods.map(pYld=>'<td>'+(PROD.matA[pAb]&&PROD.matA[pAb][pYld]!==null?PROD.matA[pAb][pYld].toFixed(2):'—')+'</td>').join('')+'</tr>';}});h+='</table>';mA.innerHTML=h;if(!PROD.matB){{mB.innerHTML='<div class="error">No matrix B data</div>';return;}}var h='<table><tr><th>Ab↓ Yld→</th>'+PROD.periods.map(p=>'<th>'+PROD.period_labels[p]+'</th>').join('')+'</tr>';PROD.periods.forEach(pAb=>{{h+='<tr><th>'+PROD.period_labels[pAb]+'</th>'+PROD.periods.map(pYld=>'<td>'+(PROD.matB[pAb]&&PROD.matB[pAb][pYld]!==null?PROD.matB[pAb][pYld].toFixed(2):'—')+'</td>').join('')+'</tr>';}});h+='</table>';mB.innerHTML=h;}}
 function drawTable(id,data){{var el=document.getElementById(id);if(!el||!data)return;var h='<table><tr><th>Period</th><th>D1-D4</th><th>D2-D4</th><th>D3-D4</th><th>D4</th></tr>';data.forEach(r=>{{h+='<tr><td>'+r.label+'</td>';['D1-D4','D2-D4','D3-D4','D4'].forEach(v=>{{var d=r.vars[v];h+='<td>'+(d&&d.point!==null?(d.point*100).toFixed(1)+'%':'—')+'</td>';}});h+='</tr>';}});h+='</table>';el.innerHTML=h;}}
 window.onload=function(){{drawTable('tbl-w',WK);drawTable('tbl-m',MO);drawTable('tbl-c',CU);renderProd();}};
 </script></body></html>'''
@@ -390,9 +454,9 @@ window.onload=function(){{drawTable('tbl-w',WK);drawTable('tbl-m',MO);drawTable(
 # 5. MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 def main():
-    print("=" * 60)
+    print("=" * 70)
     print("TX + US Cotton — Drought Predictor")
-    print("=" * 60)
+    print("=" * 70)
     
     for p in [COTTON_CSV, DROUGHT_CSV]:
         if not p.exists(): 
@@ -402,24 +466,34 @@ def main():
     has_us = DROUGHT_US_CSV.exists()
     print(f"US drought file: {'FOUND' if has_us else 'NOT FOUND'}")
     
+    print("\nLoading cotton data...")
     cotton = load_cotton(COTTON_CSV)
+    
+    print("\nLoading drought data...")
     drought_tx = load_drought(DROUGHT_CSV, "TX")
     
+    print("\nGetting abandonment series...")
     ab_tx = get_abandonment_series(cotton, "TX")
     if ab_tx is None:
         print("ERROR: No TX abandonment data")
         sys.exit(1)
     
-    print("\nBuilding TX models...")
+    print("\nBuilding TX regression models...")
     wk_rows, _ = build_weekly(ab_tx, drought_tx)
     mo_rows = build_monthly(ab_tx, drought_tx)
     cu_rows = build_cumulative(ab_tx, drought_tx)
     best_tx = best_prediction(wk_rows, mo_rows, cu_rows)
-    print(f"TX: {len(wk_rows)} weekly, Best R²={best_tx.get('r2',0)*100:.1f}%")
+    print(f"TX: {len(wk_rows)} weekly rows")
+    print(f"Best: {best_tx.get('variable','—')} ({best_tx.get('model','—')}) R²={best_tx.get('r2',0)*100:.1f}%")
     
-    print("\nBuilding production...")
+    print("\nBuilding production data...")
     prod = build_production(cotton, best_tx)
-    print(f"States: {len(prod['state_data'])}, Matrices built: {'YES' if prod['matA'] else 'NO'}")
+    
+    # Check what we got
+    print(f"\nProduction data summary:")
+    print(f"  States: {len(prod['state_data'])}")
+    print(f"  Matrix A keys: {list(prod['matA'].keys()) if prod['matA'] else 'None'}")
+    print(f"  Sample A[5yr][5yr]: {prod['matA'].get('5', {}).get('5', 'N/A') if prod['matA'] else 'N/A'}")
     
     summary = build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab_tx, drought_tx)
     
@@ -427,7 +501,7 @@ def main():
     OUTPUT_HTML.parent.mkdir(exist_ok=True)
     html = make_html(wk_rows, mo_rows, cu_rows, prod, best_tx, summary, "90")
     OUTPUT_HTML.write_text(html, encoding="utf-8")
-    print(f"✓ Done: {OUTPUT_HTML} ({OUTPUT_HTML.stat().st_size//1024} KB)")
+    print(f"\n✓ Done: {OUTPUT_HTML} ({OUTPUT_HTML.stat().st_size//1024} KB)")
 
 if __name__ == "__main__":
     main()
