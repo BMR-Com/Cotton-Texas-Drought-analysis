@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for rebase operations
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -41,6 +43,13 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/index.html docs/.nojekyll
-          git diff --cached --quiet || \
+          
+          # Only commit if there are changes
+          git diff --cached --quiet && exit 0 || \
             git commit -m "chore: regenerate dashboard [$(date -u +%Y-%m-%d)]"
-          git push
+          
+          # FIX: Pull remote changes before pushing
+          git pull --rebase origin main
+          
+          # Now push safely
+          git push origin main
