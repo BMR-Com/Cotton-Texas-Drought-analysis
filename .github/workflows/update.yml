@@ -11,8 +11,8 @@ on:
 
 permissions:
   contents: write
-  pages: write      # Add this for GitHub Pages
-  id-token: write   # Add this for GitHub Pages
+  pages: write
+  id-token: write
 
 jobs:
   build:
@@ -23,6 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify data files exist
         run: |
@@ -74,5 +75,16 @@ jobs:
           fi
           
           git commit -m "chore: regenerate dashboard [$(date -u +%Y-%m-%d)]"
-          git pull --rebase origin main
+          
+          # FIX: Use merge instead of rebase, prefer our changes on conflict
+          git fetch origin main
+          git merge origin/main --strategy-option=ours || true
+          
+          # If merge failed, force our version
+          git checkout --ours docs/index.html || true
+          git add docs/index.html || true
+          git commit -m "resolve: merge conflict keep regenerated dashboard" || true
+          
           git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
