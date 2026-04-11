@@ -7,9 +7,12 @@ on:
   push:
     paths:
       - "data/**"
+      - "process_data.py"
 
 permissions:
   contents: write
+  pages: write      # Add this for GitHub Pages
+  id-token: write   # Add this for GitHub Pages
 
 jobs:
   build:
@@ -19,7 +22,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history for rebase operations
+          fetch-depth: 0
+
+      - name: Verify data files exist
+        run: |
+          echo "Checking data files..."
+          ls -la data/
+          if [ ! -f "data/drought_US.csv" ]; then
+            echo "ERROR: drought_US.csv not found!"
+            exit 1
+          fi
+          if [ ! -f "data/drought_texas.csv" ]; then
+            echo "ERROR: drought_texas.csv not found!"
+            exit 1
+          fi
+          if [ ! -f "data/cotton_texas.csv" ]; then
+            echo "ERROR: cotton_texas.csv not found!"
+            exit 1
+          fi
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -36,20 +56,23 @@ jobs:
           touch docs/.nojekyll
 
       - name: Run analysis — generate docs/index.html
-        run: python process_data.py
+        run: |
+          python process_data.py
+          echo "Checking generated file..."
+          ls -la docs/
 
       - name: Commit and push updated dashboard
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/index.html docs/.nojekyll
           
           # Only commit if there are changes
-          git diff --cached --quiet && exit 0 || \
-            git commit -m "chore: regenerate dashboard [$(date -u +%Y-%m-%d)]"
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
           
-          # FIX: Pull remote changes before pushing
+          git commit -m "chore: regenerate dashboard [$(date -u +%Y-%m-%d)]"
           git pull --rebase origin main
-          
-          # Now push safely
           git push origin main
