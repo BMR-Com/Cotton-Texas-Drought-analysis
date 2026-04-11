@@ -31,13 +31,11 @@ DROUGHT_US_CSV = Path("data/drought_US.csv")
 DROUGHT_CSV   = Path("data/drought_texas.csv")
 OUTPUT_HTML   = Path("docs/index.html")
 MONTH_NAMES   = {4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sep",10:"Oct"}
+EXCLUDE_STATES = {"KY", "NV"}  # Kentucky and Nevada have zero cotton data
 US_GEO        = "US"
 ANALOG_TOP_N  = 5
 PERIODS       = [1, 5, 10, 15, 20]
 PERIOD_LABELS = {1:"1yr", 5:"5yr", 10:"10yr", 15:"15yr", 20:"20yr"}
-
-# States to exclude due to zero/invalid data
-EXCLUDE_STATES = {"KY", "NV"}  # Kentucky and Nevada have zero cotton data
 
 # ═══════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -58,7 +56,6 @@ def jd(obj):
         raise TypeError(f"Not serializable: {type(x)}")
     return json.dumps(obj, separators=(",",":"), default=h)
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. LOAD DATA
 # ═══════════════════════════════════════════════════════════════════════════
@@ -70,7 +67,6 @@ def load_cotton(path):
 
     # FILTER OUT INVALID STATES (KY, NV with zero data)
     df = df[~df["geography"].isin(EXCLUDE_STATES)].copy()
-
     df["period"]    = pd.to_numeric(df["period"], errors="coerce")
     df["value"]     = pd.to_numeric(df["value"],  errors="coerce")
     df = df.dropna(subset=["period","value"]).rename(columns={"period":"mkt_year"})
@@ -85,7 +81,7 @@ def load_cotton(path):
     ).reset_index()
     pivot.columns.name = None
 
-    # Compute abandonment for non-US rows with validation
+    # Compute abandonment for non-US rows
     has_plt = "upland_cotton_planted_acreage"  in pivot.columns
     has_hvs = "upland_cotton_harvested_acreage" in pivot.columns
     if has_plt and has_hvs:
@@ -103,55 +99,25 @@ def load_cotton(path):
         pivot.loc[non_us & ~valid_plt, "abandonment"] = np.nan
 
     geos = sorted(pivot["geography"].unique())
-    print(f"  Cotton: {len(geos)} geographies (excluded: {EXCLUDE_STATES}), "
+    print(f"  Cotton: {len(geos)} geographies, "
           f"years {int(pivot.mkt_year.min())}–{int(pivot.mkt_year.max())}")
     return pivot
+
 
 
 def build_us_ab(cotton):
     """US abandonment from the US-total row in cotton CSV."""
     us = cotton[cotton["geography"]==US_GEO].copy()
-    if us.empty: 
-        # Try to derive from state sum if US row missing
-        non_us = cotton[~cotton["geography"].isin([US_GEO] | EXCLUDE_STATES)].copy()
-        if non_us.empty:
-            return None
-        # Check if we have required columns
-        if "upland_cotton_planted_acreage" not in non_us.columns or \
-           "upland_cotton_harvested_acreage" not in non_us.columns:
-            return None
-
-        # Group by year and sum
-        grp = non_us.groupby("mkt_year").agg({
-            "upland_cotton_planted_acreage": "sum",
-            "upland_cotton_harvested_acreage": "sum"
-        })
-        # Only calculate where planted > 0
-        valid = grp["upland_cotton_planted_acreage"] > 0
-        if valid.any():
-            grp.loc[valid, "abandonment"] = (
-                1 - grp.loc[valid, "upland_cotton_harvested_acreage"] / 
-                grp.loc[valid, "upland_cotton_planted_acreage"]
-            ).clip(0, 1)
-            ab = grp.loc[valid, "abandonment"].dropna()
-            if len(ab) >= 5:
-                print(f"  US abandonment derived from state sum: {len(ab)} years")
-                return ab
-        return None
-
+    if us.empty: return None
     us = us.set_index("mkt_year")
     if "abandonment" not in us.columns:
         p,h = "upland_cotton_planted_acreage","upland_cotton_harvested_acreage"
         if p in us.columns and h in us.columns:
-            # Only calculate where planted > 0
-            valid = us[p] > 0
-            us.loc[valid, "abandonment"] = (1 - us.loc[valid, h]/us.loc[valid, p]).clip(0,1)
-            us.loc[~valid, "abandonment"] = np.nan
+            us["abandonment"] = (1 - us[h]/us[p]).clip(0,1)
         else:
             return None
     ab = us["abandonment"].dropna()
-    if len(ab) < 5: 
-        return None
+    if len(ab) < 5: return None
     print(f"  US abandonment: {len(ab)} years ({int(ab.index.min())}–{int(ab.index.max())})")
     return ab
 
@@ -248,15 +214,11 @@ def get_hist(ab, drought, curr_yr):
 
 def build_arr(hist_dict, ab):
     yrs = sorted(set(hist_dict.keys()) & set(ab.index))
-    if not yrs:
-        return np.array([]), np.array([]), []
     x = np.array([hist_dict[y] for y in yrs], dtype=float)
     y = np.array([ab[y] for y in yrs], dtype=float)
     return x, y, yrs
 
 def build_weekly(ab, drought):
-    if ab.empty or drought.empty:
-        return [], None
     curr_yr = get_curr_yr(ab, drought)
     hist    = get_hist(ab, drought, curr_yr)
     curr_df = drought[drought["mkt_year"]==curr_yr].sort_values("Week")
@@ -266,24 +228,19 @@ def build_weekly(ab, drought):
         row = {"iso_week":iw, "label":week_label(iw),
                "date":str(cr["Week"].date()), "curr_yr":curr_yr, "vars":{}}
         for v in DROUGHT_VARS:
-            if pd.isna(cr.get(v)): 
-                row["vars"][v]=None; 
-                continue
+            if pd.isna(cr.get(v)): row["vars"][v]=None; continue
             hd={}
             for hy,hg in hist.groupby("mkt_year"):
                 sub=hg[hg["iso_week"]==iw]
-                if sub.empty: 
-                    sub=hg[(hg["iso_week"]-iw).abs()<=1]
+                if sub.empty: sub=hg[(hg["iso_week"]-iw).abs()<=1]
                 if not sub.empty and pd.notna(sub[v].iloc[0]):
                     hd[hy]=float(sub[v].iloc[0])
             x,y,yrs=build_arr(hd,ab)
-            row["vars"][v]=ols_fit(x,y,float(cr[v]),yrs) if len(x) > 0 else None
+            row["vars"][v]=ols_fit(x,y,float(cr[v]),yrs)
         rows.append(row)
     return rows, curr_yr
 
 def build_monthly(ab, drought):
-    if ab.empty or drought.empty:
-        return []
     curr_yr = get_curr_yr(ab, drought)
     hist    = get_hist(ab, drought, curr_yr)
     curr_df = drought[drought["mkt_year"]==curr_yr]
@@ -292,22 +249,17 @@ def build_monthly(ab, drought):
         row={"month":mo,"label":MONTH_NAMES.get(mo,f"M{mo}"),"curr_yr":curr_yr,"vars":{}}
         for v in DROUGHT_VARS:
             mc=curr_df[curr_df["month"]==mo][v].dropna()
-            if mc.empty: 
-                row["vars"][v]=None; 
-                continue
+            if mc.empty: row["vars"][v]=None; continue
             hd={}
             for hy,hg in hist.groupby("mkt_year"):
                 sub=hg[hg["month"]==mo][v].dropna()
-                if not sub.empty: 
-                    hd[hy]=float(sub.mean())
+                if not sub.empty: hd[hy]=float(sub.mean())
             x,y,yrs=build_arr(hd,ab)
-            row["vars"][v]=ols_fit(x,y,float(mc.mean()),yrs) if len(x) > 0 else None
+            row["vars"][v]=ols_fit(x,y,float(mc.mean()),yrs)
         rows.append(row)
     return rows
 
 def build_cumulative(ab, drought):
-    if ab.empty or drought.empty:
-        return []
     curr_yr = get_curr_yr(ab, drought)
     hist    = get_hist(ab, drought, curr_yr)
     curr_df = drought[drought["mkt_year"]==curr_yr].sort_values("Week")
@@ -319,16 +271,13 @@ def build_cumulative(ab, drought):
         cs=curr_df[curr_df["iso_week"]<=iw]
         for v in DROUGHT_VARS:
             cv=cs[v].dropna()
-            if cv.empty: 
-                row["vars"][v]=None; 
-                continue
+            if cv.empty: row["vars"][v]=None; continue
             hd={}
             for hy,hg in hist.groupby("mkt_year"):
                 sub=hg[hg["iso_week"]<=iw][v].dropna()
-                if not sub.empty: 
-                    hd[hy]=float(sub.mean())
+                if not sub.empty: hd[hy]=float(sub.mean())
             x,y,yrs=build_arr(hd,ab)
-            row["vars"][v]=ols_fit(x,y,float(cv.mean()),yrs) if len(x) > 0 else None
+            row["vars"][v]=ols_fit(x,y,float(cv.mean()),yrs)
         rows.append(row)
     return rows
 
@@ -336,8 +285,7 @@ def best_prediction(wk, mo, cu):
     best={"r2":-1,"point":None,"lo":None,"hi":None,
           "variable":None,"model":None,"label":None,"curr_yr":None}
     for rows,mname in [(wk,"Weekly"),(mo,"Monthly"),(cu,"Cumulative")]:
-        if not rows: 
-            continue
+        if not rows: continue
         last=rows[-1]
         for v in DROUGHT_VARS:
             d=last.get("vars",{}).get(v)
@@ -352,9 +300,6 @@ def best_prediction(wk, mo, cu):
 # 4. SEASONALITY LINE DATA
 # ═══════════════════════════════════════════════════════════════════════════
 def build_season_lines(drought, geo_label='TX', n_years=20):
-    if drought is None or drought.empty:
-        return None
-
     max_yr   = drought["cal_year"].max()
     curr_yr  = int(drought["mkt_year"].max())
     min_yr   = max_yr - n_years + 1
@@ -375,8 +320,7 @@ def build_season_lines(drought, geo_label='TX', n_years=20):
     for _,row in curr_df.tail(6).iterrows():
         entry={"date":str(row["Week"].date()),"label":week_label(int(row["iso_week"])),
                "iso_week":int(row["iso_week"]),"year":int(curr_yr),"is_current":True}
-        for v in DROUGHT_VARS: 
-            entry[v]=safe(row.get(v),1)
+        for v in DROUGHT_VARS: entry[v]=safe(row.get(v),1)
         out["last6_weeks"].append(entry)
 
     # Latest week — used for single-week comparison rows
@@ -409,8 +353,7 @@ def build_season_lines(drought, geo_label='TX', n_years=20):
             yl=series.get(yr,[])
             yv=[yl[i] for i in range(lat_idx+1) if i<len(yl) and yl[i] is not None]
             n=min(len(c_vals),len(yv))
-            if n<2: 
-                continue
+            if n<2: continue
             scores.append((yr,float(np.sqrt(np.mean(
                 (np.array(c_vals[:n])-np.array(yv[:n]))**2)))))
         scores.sort(key=lambda x:x[1])
@@ -455,53 +398,29 @@ def build_production(cotton, best_tx):
     """
     max_yr = int(cotton["mkt_year"].max())
 
-    # Get per-state per-period averages - FILTER OUT EXCLUDED STATES
+    # Get per-state per-period averages
     state_data = {}
-    all_states  = [g for g in cotton["geography"].unique() 
-                   if g != US_GEO and g not in EXCLUDE_STATES]
+    all_states  = [g for g in cotton["geography"].unique() if g != US_GEO]
 
     for state in all_states:
         sdf = cotton[cotton["geography"]==state].copy()
         sdf = sdf[sdf["mkt_year"]<=max_yr].sort_values("mkt_year")
-        if sdf.empty: 
-            continue
-
-        # Validate state has valid data
-        if "upland_cotton_planted_acreage" not in sdf.columns:
-            continue
-        if sdf["upland_cotton_planted_acreage"].sum() <= 0:
-            print(f"    Skipping {state}: zero planted acreage")
-            continue
-
+        if sdf.empty: continue
         sd={"periods":{}}
         for P in PERIODS:
             rec=sdf[sdf["mkt_year"]>=max_yr-P+1]
-            if rec.empty: 
-                sd["periods"][P]=None; 
-                continue
+            if rec.empty: sd["periods"][P]=None; continue
             def g(col):
-                if col not in rec.columns: 
-                    return None
+                if col not in rec.columns: return None
                 v=rec[col].dropna()
                 return safe(float(v.mean()), 2) if len(v) else None
-
-            ab_val = g("abandonment")
-            yld_val = g("upland_cotton_lint_yield")
-            plt_val = g("upland_cotton_planted_acreage")
-
-            # Only include if we have valid planted data
-            if plt_val is None or plt_val <= 0:
-                sd["periods"][P] = None
-                continue
-
             sd["periods"][P]={
-                "ab":  ab_val,
-                "yld": yld_val,
-                "plt": plt_val,
+                "ab":  g("abandonment"),
+                "yld": g("upland_cotton_lint_yield"),
+                "plt": g("upland_cotton_planted_acreage"),
                 "prd": g("upland_cotton_production"),
             }
-
-        # Last year actual
+            # Last year actual
         lr=sdf.iloc[-1]
         sd["last_yr_actual"]={
             "year":int(lr["mkt_year"]),
@@ -513,10 +432,7 @@ def build_production(cotton, best_tx):
 
     def prod_mn_bales(plt_k, ab, yld):
         """plt_k = 1000 acres, yld = lb/acre → mn 480-lb bales"""
-        if plt_k is None or ab is None or yld is None: 
-            return None
-        if plt_k <= 0 or yld < 0 or ab < 0 or ab > 1:
-            return None
+        if plt_k is None or ab is None or yld is None: return None
         return round(plt_k * 1000 * (1-ab) * yld / 480_000_000, 3)
 
     # Matrix A: 5×5 — rows=abandon period, cols=yield period, all states historical
@@ -531,21 +447,10 @@ def build_production(cotton, best_tx):
             for st, sd in state_data.items():
                 pa = sd["periods"].get(P_ab)
                 py = sd["periods"].get(P_yld)
-                if not pa or not py: 
-                    ok=False; 
-                    break
-                ab_a  = pa["ab"];  
-                ab_b = (model_ab if st=="TX" and model_ab is not None else pa["ab"])
-                yld   = py["yld"]; 
-                plt  = pa["plt"]
-
-                # Validate values
-                if ab_a is None or yld is None or plt is None or plt <= 0:
-                    ok=False; 
-                    break
-                if ab_b is None:
-                    ab_b = ab_a
-
+                if not pa or not py: ok=False; break
+                ab_a  = pa["ab"];  ab_b = (model_ab if st=="TX" else pa["ab"])
+                yld   = py["yld"]; plt  = pa["plt"]
+                if ab_a is None or yld is None or plt is None: ok=False; break
                 total_a += plt * 1000 * (1-ab_a)  * yld / 480_000_000
                 total_b += plt * 1000 * (1-ab_b)  * yld / 480_000_000
             matA[P_ab][P_yld] = round(total_a,3) if ok else None
@@ -555,28 +460,25 @@ def build_production(cotton, best_tx):
     tx_hist = cotton[(cotton["geography"]=="TX") & (cotton["mkt_year"]>=max_yr-9)]
     if not tx_hist.empty and "abandonment" in tx_hist.columns:
         ab_vals=tx_hist["abandonment"].dropna()
-        if len(ab_vals) > 0:
-            ab_lo = int(float(ab_vals.min())*20)/20
-            ab_hi = (int(float(ab_vals.max())*20)+1)/20
-            tx_ab_range=[round(ab_lo+i*0.05,2) for i in range(int(round((ab_hi-ab_lo)/0.05))+1)
-                         if round(ab_lo+i*0.05,2)<=ab_hi+0.001]
-        else:
-            tx_ab_range=[round(0.10+i*0.05,2) for i in range(13)]
+        ab_lo = int(float(ab_vals.min())*20)/20
+        ab_hi = (int(float(ab_vals.max())*20)+1)/20
+        tx_ab_range=[round(ab_lo+i*0.05,2) for i in range(int(round((ab_hi-ab_lo)/0.05))+1)
+                     if round(ab_lo+i*0.05,2)<=ab_hi+0.001]
     else:
         tx_ab_range=[round(0.10+i*0.05,2) for i in range(13)]
 
     # TX yield range (50lb steps, last 10 yrs)
     if not tx_hist.empty and "upland_cotton_lint_yield" in tx_hist.columns:
         yv=tx_hist["upland_cotton_lint_yield"].dropna()
-        if len(yv) > 0:
-            tx_yld_range=list(range(int(float(yv.min())//50)*50,
-                                    (int(float(yv.max())//50)+2)*50,50))
-        else:
-            tx_yld_range=list(range(250,851,50))
+        tx_yld_range=list(range(int(float(yv.min())//50)*50,
+                                (int(float(yv.max())//50)+2)*50,50))
     else:
         tx_yld_range=list(range(250,851,50))
 
     # Derive implied US abandonment for each TX abandonment value
+    # US_ab = (TX_plt*(1-TX_ab)*TX_yld + others) / (TX_plt + others_planted*(1-others_ab))
+    # Simplification: weighted average abandonment
+    # us_implied_ab(tx_ab) = (tx_plt*(tx_ab) + sum_other(plt_i*ab_i)) / (tx_plt + sum_other_plt)
     tx_sd = state_data.get("TX",{})
     tx_p10 = tx_sd.get("periods",{}).get(10,{}) if tx_sd else {}
     tx_plt_10 = tx_p10.get("plt") if tx_p10 else None
@@ -584,36 +486,31 @@ def build_production(cotton, best_tx):
 
     other_wtd_ab = 0.0; other_plt = 0.0
     for st, sd in state_data.items():
-        if st=="TX": 
-            continue
+        if st=="TX": continue
         p10=sd.get("periods",{}).get(10,{})
-        if p10 and p10.get("ab") is not None and p10.get("plt") is not None and p10["plt"] > 0:
+        if p10 and p10.get("ab") is not None and p10.get("plt") is not None:
             other_wtd_ab += p10["ab"]*p10["plt"]
             other_plt    += p10["plt"]
 
     def us_ab_from_tx(tx_ab):
-        if tx_plt_10 is None or other_plt==0: 
-            return tx_ab
+        if tx_plt_10 is None or other_plt==0: return tx_ab
         return (tx_ab*tx_plt_10 + other_wtd_ab) / (tx_plt_10 + other_plt)
 
     # US yield range (50lb steps)
     us_df = cotton[(cotton["geography"]==US_GEO) & (cotton["mkt_year"]>=max_yr-9)]
     if not us_df.empty and "upland_cotton_lint_yield" in us_df.columns:
         yv=us_df["upland_cotton_lint_yield"].dropna()
-        if len(yv) > 0:
-            us_yld_range=list(range(int(float(yv.min())//50)*50,
-                                    (int(float(yv.max())//50)+2)*50,50))
-        else:
-            us_yld_range=list(range(700,1001,50))
+        us_yld_range=list(range(int(float(yv.min())//50)*50,
+                                (int(float(yv.max())//50)+2)*50,50))
     else:
+        # derive from state sum
         us_yld_range=list(range(700,1001,50))
 
     # US planted for Grid D: use US row if available, else sum states
     us_plt=None
     if not us_df.empty and "upland_cotton_planted_acreage" in us_df.columns:
         v=us_df["upland_cotton_planted_acreage"].dropna()
-        if len(v): 
-            us_plt=safe(float(v.iloc[-1]),0)
+        if len(v): us_plt=safe(float(v.iloc[-1]),0)
     if us_plt is None:
         us_plt_sum=sum(sd["periods"].get(10,{}).get("plt") or 0
                        for sd in state_data.values()
@@ -675,14 +572,11 @@ def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought)
                 sig_weeks.append(f"{row['label']} ({v}, R²={d['r2']*100:.0f}%)")
     sig_txt = ", ".join(sig_weeks[:3]) if sig_weeks else "none yet at p<0.10"
 
-    # Historical TX abandonment stats - handle empty series
-    if len(ab) > 0:
-        ab_mean = f"{ab.mean()*100:.0f}%"
-        ab_std  = f"{ab.std()*100:.0f}pp"
-        ab_min  = f"{ab.min()*100:.0f}%"
-        ab_max  = f"{ab.max()*100:.0f}%"
-    else:
-        ab_mean = ab_std = ab_min = ab_max = "N/A"
+    # Historical TX abandonment stats
+    ab_mean = f"{ab.mean()*100:.0f}%"
+    ab_std  = f"{ab.std()*100:.0f}pp"
+    ab_min  = f"{ab.min()*100:.0f}%"
+    ab_max  = f"{ab.max()*100:.0f}%"
 
     # Production context
     has_ms = prod.get("has_multi_state", False)
@@ -720,6 +614,8 @@ def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought)
         ),
     }
     return sections
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 7. HTML
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1794,8 +1690,6 @@ window.onresize=function(){{
 </html>"""
 
 
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 8. MAIN
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1829,6 +1723,24 @@ def main():
         ab_us = ab_tx  # fallback
         print("  US abandonment: using TX as proxy")
 
+    # US abandonment for US drought models (from all-states CSV)
+    us_rows = cotton[cotton["geography"]==US_GEO]
+    if not us_rows.empty and "abandonment" in us_rows.columns:
+        ab_us = us_rows.set_index("mkt_year")["abandonment"]
+    else:
+        # Derive US abandonment from state sum if US row missing
+        non_us = cotton[~cotton["geography"].isin([US_GEO])].copy()
+        if not non_us.empty and "upland_cotton_planted_acreage" in non_us.columns:
+            grp = non_us.groupby("mkt_year").apply(
+                lambda g: 1 - g["upland_cotton_harvested_acreage"].sum()
+                            / g["upland_cotton_planted_acreage"].sum()
+            ).clip(0,1)
+            ab_us = grp
+            print(f"  US abandonment derived from state sum: {len(ab_us)} years")
+        else:
+            ab_us = ab_tx  # fallback
+            print("  US abandonment: using TX as proxy (upload full all-states CSV)")
+
     print("\nBuilding TX regression models…")
     wk_rows, curr_yr = build_weekly(ab_tx, drought_tx)
     mo_rows           = build_monthly(ab_tx, drought_tx)
@@ -1840,7 +1752,7 @@ def main():
           f"R²={best_tx.get('r2',0)*100:.1f}% → {(best_tx.get('point') or 0)*100:.1f}%")
 
     print("Building US regression models…")
-    if has_us_drought and ab_us is not None and not ab_us.empty:
+    if has_us_drought and ab_us is not None:
         wk_us, _ = build_weekly(ab_us, drought_us)
         mo_us     = build_monthly(ab_us, drought_us)
         cu_us     = build_cumulative(ab_us, drought_us)
@@ -1877,7 +1789,7 @@ def main():
     )
     OUTPUT_HTML.write_text(html, encoding="utf-8")
     print(f"\n✓ Done → {OUTPUT_HTML} ({OUTPUT_HTML.stat().st_size//1024} KB)")
-    print("Open docs/index.html in any browser.")
+    print("\nOpen docs/index.html in any browser.")
 
 
 if __name__ == "__main__":
