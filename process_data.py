@@ -35,7 +35,7 @@ SEASON_START  = 14            # ISO week ~ Apr W1
 SEASON_END    = 43            # ISO week ~ Oct W4
 COTTON_CSV    = Path("data/cotton_texas.csv")
 DROUGHT_CSV   = Path("data/drought_texas.csv")
-OUTPUT_HTML   = Path("docs/cotton_drought_dashboard.html")
+OUTPUT_HTML   = Path("docs/index.html")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. LOAD DATA
@@ -937,7 +937,7 @@ def main():
     for p in [COTTON_CSV, DROUGHT_CSV]:
         if not p.exists():
             print(f"\nERROR: {p} not found.")
-            print(f"Place your CSV files in the same folder as this script.")
+            print(f"Place your CSV files in the data/ subfolder.")
             sys.exit(1)
 
     print("\nLoading data…")
