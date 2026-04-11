@@ -29,7 +29,6 @@ SEASON_MONTHS = [4, 5, 6, 7, 8, 9, 10]
 COTTON_CSV     = Path("data/cotton_texas.csv")
 DROUGHT_US_CSV = Path("data/drought_US.csv")
 DROUGHT_CSV   = Path("data/drought_texas.csv")
-DROUGHT_US_CSV = Path("data/drought_US.csv")
 OUTPUT_HTML   = Path("docs/index.html")
 MONTH_NAMES   = {4:"Apr",5:"May",6:"Jun",7:"Jul",8:"Aug",9:"Sep",10:"Oct"}
 US_GEO        = "US"
@@ -758,16 +757,8 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   <div class="tab"        onclick="showTab('t7')">📋 Summary</div>
   <div class="tab"        onclick="showTab('t8')">🔬 Diagnostics</div>
 </div>
-  <div class="tab active" onclick="showTab('t1')">🌡 Seasonality</div>
-  <div class="tab"        onclick="showTab('t2')">📊 Weekly</div>
-  <div class="tab"        onclick="showTab('t3')">📅 Monthly</div>
-  <div class="tab"        onclick="showTab('t4')">📈 Cumulative</div>
-  <div class="tab"        onclick="showTab('t5')">🌽 Production</div>
-  <div class="tab"        onclick="showTab('t6')">📋 Summary</div>
-  <div class="tab"        onclick="showTab('t7')">🔬 Diagnostics</div>
-</div>
 
-<!-- ═══ TAB 1: SEASONALITY ════════════════════════════════════════════════ -->
+<!-- ═══ TAB 1: TX SEASONALITY ════════════════════════════════════════════════ -->
 <div id="t1" class="panel active">
   <div class="st">Drought Seasonality — Line Charts ({curr_yr} vs Historical)</div>
   <div class="sn">Each variable shown as a line chart. Grey = all historical years. Bold = current year {curr_yr}. Dashed colored = top 5 analog years. Vertical dotted line = latest data point.</div>
@@ -815,7 +806,6 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
 </div>
 
-
 <!-- ═══ TAB 2: US DROUGHT SEASONALITY ══════════════════════════════════ -->
 <div id="t2" class="panel">
   <div class="st">US Cotton Drought Seasonality — Line Charts</div>
@@ -824,8 +814,10 @@ td.bc{{color:#9070c0;font-size:.65rem}}
     <div class="ctrl"><span>Show</span>
       <select id="sl-var-us" onchange="drawSeasonChartsUS()">
         <option value="ALL">All 4 variables (2×2)</option>
-        <option value="D1-D4">D1-D4 only</option><option value="D2-D4">D2-D4 only</option>
-        <option value="D3-D4">D3-D4 only</option><option value="D4">D4 only</option>
+        <option value="D1-D4">D1-D4 only</option>
+        <option value="D2-D4">D2-D4 only</option>
+        <option value="D3-D4">D3-D4 only</option>
+        <option value="D4">D4 only</option>
       </select>
     </div>
     <div class="ctrl"><span>Swap analog slot</span>
@@ -845,8 +837,10 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   <div class="ctrls">
     <div class="ctrl"><span>Variable</span>
       <select id="l6-var-us" onchange="drawLast6US()">
-        <option value="D1-D4">D1-D4</option><option value="D2-D4">D2-D4</option>
-        <option value="D3-D4">D3-D4</option><option value="D4">D4</option>
+        <option value="D1-D4">D1-D4</option>
+        <option value="D2-D4">D2-D4</option>
+        <option value="D3-D4">D3-D4</option>
+        <option value="D4">D4</option>
       </select>
     </div>
   </div>
@@ -857,7 +851,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
 </div>
 
-<!-- ═══ TAB 2: WEEKLY ═════════════════════════════════════════════════════ -->
+<!-- ═══ TAB 3: WEEKLY ═════════════════════════════════════════════════════ -->
 <div id="t3" class="panel">
   <div class="ctrls">
     <div class="ctrl"><span>Geography</span>
@@ -869,14 +863,6 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
   <div id="wk-st" class="st">Weekly Model — TX</div>
   <div class="sn">Predictor = that exact week's drought %. Latest available week shown. ★ = current season ({ci_pct}% CI).</div>
-  <div class="ctrls" style="margin-bottom:8px">
-    <div class="ctrl"><span>Geography</span>
-      <div style="display:flex;border:1px solid #2d3e50;border-radius:5px;overflow:hidden">
-        <button class="btn" id="wk-tx-btn" style="border-radius:0;background:#1a4030;color:#68d391" onclick="setWkGeo('TX')">TX</button>
-        <button class="btn" id="wk-us-btn" style="border-radius:0;background:#1a2535;color:#90a4ae" onclick="setWkGeo('US')">US</button>
-      </div>
-    </div>
-  </div>
   <div class="sc-grid" id="sc-w"></div>
   <div class="st">Weekly Model — Prediction Table</div>
   <div class="tw"><div id="tbl-w"></div></div>
@@ -887,7 +873,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
 </div>
 
-<!-- ═══ TAB 3: MONTHLY ════════════════════════════════════════════════════ -->
+<!-- ═══ TAB 4: MONTHLY ════════════════════════════════════════════════════ -->
 <div id="t4" class="panel">
   <div class="ctrls">
     <div class="ctrl"><span>Geography</span>
@@ -899,14 +885,6 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
   <div id="mo-st" class="st">Monthly Model — TX</div>
   <div class="sn">Predictor = average drought for that calendar month. Latest available month shown.</div>
-  <div class="ctrls" style="margin-bottom:8px">
-    <div class="ctrl"><span>Geography</span>
-      <div style="display:flex;border:1px solid #2d3e50;border-radius:5px;overflow:hidden">
-        <button class="btn" id="mo-tx-btn" style="border-radius:0;background:#1a4030;color:#68d391" onclick="setMoGeo('TX')">TX</button>
-        <button class="btn" id="mo-us-btn" style="border-radius:0;background:#1a2535;color:#90a4ae" onclick="setMoGeo('US')">US</button>
-      </div>
-    </div>
-  </div>
   <div class="sc-grid" id="sc-m"></div>
   <div class="st">Monthly Model — Prediction Table</div>
   <div class="tw"><div id="tbl-m"></div></div>
@@ -916,7 +894,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
 </div>
 
-<!-- ═══ TAB 4: CUMULATIVE ═════════════════════════════════════════════════ -->
+<!-- ═══ TAB 5: CUMULATIVE ═════════════════════════════════════════════════ -->
 <div id="t5" class="panel">
   <div class="ctrls">
     <div class="ctrl"><span>Geography</span>
@@ -928,14 +906,6 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
   <div id="cu-st" class="st">Cumulative Model — TX</div>
   <div class="sn">Predictor = running average drought from Apr W1 through that week.</div>
-  <div class="ctrls" style="margin-bottom:8px">
-    <div class="ctrl"><span>Geography</span>
-      <div style="display:flex;border:1px solid #2d3e50;border-radius:5px;overflow:hidden">
-        <button class="btn" id="cu-tx-btn" style="border-radius:0;background:#1a4030;color:#68d391" onclick="setCuGeo('TX')">TX</button>
-        <button class="btn" id="cu-us-btn" style="border-radius:0;background:#1a2535;color:#90a4ae" onclick="setCuGeo('US')">US</button>
-      </div>
-    </div>
-  </div>
   <div class="sc-grid" id="sc-c"></div>
   <div class="st">Cumulative Model — Prediction Table</div>
   <div class="tw"><div id="tbl-c"></div></div>
@@ -945,7 +915,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
 </div>
 
-<!-- ═══ TAB 5: PRODUCTION ════════════════════════════════════════════════ -->
+<!-- ═══ TAB 6: PRODUCTION ════════════════════════════════════════════════ -->
 <div id="t6" class="panel">
   <div id="best-banner" class="best-banner"></div>
 
@@ -1005,7 +975,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
 </div>
 
-<!-- ═══ TAB 6: SUMMARY ════════════════════════════════════════════════════ -->
+<!-- ═══ TAB 7: SUMMARY ════════════════════════════════════════════════════ -->
 <div id="t7" class="panel">
   <div class="st">Analyst Summary — Full Report</div>
   <div class="sn">Auto-generated from current data. Edit any section before printing.</div>
@@ -1035,7 +1005,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   </div>
 </div>
 
-<!-- ═══ TAB 7: DIAGNOSTICS ═══════════════════════════════════════════════ -->
+<!-- ═══ TAB 8: DIAGNOSTICS ═══════════════════════════════════════════════ -->
 <div id="t8" class="panel">
   <div class="st">R² Comparison — All Three Models</div>
   <div class="sn"><span style="color:#68d391">■ Weekly</span> · <span style="color:#f6e05e">■ Monthly</span> · <span style="color:#90a0ff">■ Cumulative</span></div>
@@ -1056,7 +1026,7 @@ var VC={{"D1-D4":"#68d391","D2-D4":"#f6e05e","D3-D4":"#fc8181","D4":"#d6bcfa"}};
 var VBG={{"D1-D4":"#0a1f14","D2-D4":"#1f1a08","D3-D4":"#1f0a0a","D4":"#130a1f"}};
 var MC={{"weekly":"#68d391","monthly":"#f6e05e","cumulative":"#90a0ff"}};
 var ACOLS=["#ff6b6b","#ffd93d","#6bcb77","#4d96ff","#c77dff"];
-var ANALOGS={{}};
+var ANALOGS={{}};var ANALOGS_US={{}};var GEO_STATE={{"wk":"TX","mo":"TX","cu":"TX"}};
 
 // ── Tabs ──────────────────────────────────────────────────────────────────
 function showTab(id){{
@@ -1087,49 +1057,44 @@ function sp(cx,cy,or_,ir,pts){{
   var d="";for(var i=0;i<pts*2;i++){{var r=i%2===0?or_:ir,a=(Math.PI/pts)*i-Math.PI/2;d+=(i===0?"M":"L")+(cx+r*Math.cos(a)).toFixed(2)+","+(cy+r*Math.sin(a)).toFixed(2);}}return d+"Z";
 }}
 
-
 // ── Geography state ────────────────────────────────────────────────────────
-var SL_GEO = "TX";  // seasonality geo
-var WK_GEO = "TX";  // weekly geo
-var MO_GEO = "TX";  // monthly geo
-var CU_GEO = "TX";  // cumulative geo
-
+var SL_GEO = "TX";
 function getSlData(){{ return SL_GEO==="US"?SL_US:SL; }}
-function getWkData(){{ return WK_GEO==="US"?WK_US:WK; }}
-function getMoData(){{ return MO_GEO==="US"?MO_US:MO; }}
-function getCuData(){{ return CU_GEO==="US"?CU_US:CU; }}
+function getWkData(){{ return GEO_STATE.wk==="US"?WK_US:WK; }}
+function getMoData(){{ return GEO_STATE.mo==="US"?MO_US:MO; }}
+function getCuData(){{ return GEO_STATE.cu==="US"?CU_US:CU; }}
 
 function setSlGeo(geo){{
   SL_GEO=geo;
   setGeoBtn("sl-tx-btn","sl-us-btn",geo);
-  // Update analog year dropdown for new geo
   var d=(geo==="US"?SL_US:SL).variables["D1-D4"];
   var sel=document.getElementById("sl-yr");
   if(sel&&d){{
     sel.innerHTML='<option value="">—</option>';
     d.all_hist_years.forEach(function(yr){{sel.innerHTML+='<option value="'+yr+'">'+yr+'</option>';}});
   }}
-  // Reset analogs for new geo
   VARS.forEach(function(v){{var dd=(geo==="US"?SL_US:SL).variables[v];ANALOGS[v]=dd?dd.analogs.slice():[];}});
   drawSeasonCharts();drawLast6();
 }}
-function setWkGeo(geo){{
-  WK_GEO=geo;setGeoBtn("wk-tx-btn","wk-us-btn",geo);
-  var rows=getWkData();var last=rows&&rows.length?rows[rows.length-1]:null;
-  var lbl=last?last.label:"";
-  document.querySelectorAll("#t2 .st")[0].textContent="Weekly Model — Scatter Plots ("+(geo==="US"?"US Cotton":"TX")+")";
-  drawScSet("sc-w",rows);drawTblSet("tbl-w",rows,"label");
+
+function setGeo(tab,geo){{
+  GEO_STATE[tab]=geo;
+  var on="#1a4030",off="#1a2535",onT="#68d391",offT="#90a4ae";
+  var txBtn=document.getElementById(tab+"-tx-btn");
+  var usBtn=document.getElementById(tab+"-us-btn");
+  if(txBtn){{txBtn.style.background=geo==="TX"?on:off;txBtn.style.color=geo==="TX"?onT:offT;}}
+  if(usBtn){{usBtn.style.background=geo==="US"?on:off;usBtn.style.color=geo==="US"?onT:offT;}}
+  var rowsTX={{"wk":WK,"mo":MO,"cu":CU}};
+  var rowsUS={{"wk":WK_US,"mo":MO_US,"cu":CU_US}};
+  var rows=geo==="US"?rowsUS[tab]:rowsTX[tab];
+  var st=document.getElementById(tab+"-st");
+  if(st)st.textContent={{"wk":"Weekly","mo":"Monthly","cu":"Cumulative"}}[tab]+" Model — "+geo;
+  var sc_ids={{"wk":"sc-w","mo":"sc-m","cu":"sc-c"}};
+  var tbl_ids={{"wk":"tbl-w","mo":"tbl-m","cu":"tbl-c"}};
+  drawScSet(sc_ids[tab],rows||[]);
+  drawTblSet(tbl_ids[tab],rows||[],"label");
 }}
-function setMoGeo(geo){{
-  MO_GEO=geo;setGeoBtn("mo-tx-btn","mo-us-btn",geo);
-  var rows=getMoData();
-  drawScSet("sc-m",rows);drawTblSet("tbl-m",rows,"label");
-}}
-function setCuGeo(geo){{
-  CU_GEO=geo;setGeoBtn("cu-tx-btn","cu-us-btn",geo);
-  var rows=getCuData();
-  drawScSet("sc-c",rows);drawTblSet("tbl-c",rows,"label");
-}}
+
 function setGeoBtn(txId,usId,geo){{
   var tx=document.getElementById(txId),us=document.getElementById(usId);
   if(tx){{tx.style.background=geo==="TX"?"#1a4030":"#1a2535";tx.style.color=geo==="TX"?"#68d391":"#90a4ae";}}
@@ -1137,13 +1102,6 @@ function setGeoBtn(txId,usId,geo){{
 }}
 
 // ── Init ───────────────────────────────────────────────────────────────────
-
-// ══════════════════════════════════════════════════════════════════════════
-// US SEASONALITY + GEO TOGGLE JS
-// ══════════════════════════════════════════════════════════════════════════
-var ANALOGS_US={{}};
-var GEO_STATE={{"wk":"TX","mo":"TX","cu":"TX"}};
-
 function initAnalogsUS(){{
   if(!SL_US||!SL_US.variables)return;
   VARS.forEach(function(v){{var d=SL_US.variables[v];ANALOGS_US[v]=d?d.analogs.slice():[];}});
@@ -1186,8 +1144,6 @@ function drawLast6US(){{
   drawLast6Generic(c,vn,SL_US);
 }}
 
-// Generic last-6 table: shows 6 current weeks + 1 last-yr row + 5 analog rows
-// all comparison rows use LATEST WEEK values for all 4 drought vars
 function drawLast6Generic(c,vn,slData){{
   if(!slData||!slData.variables){{c.innerHTML='<div style="color:#607080;padding:10px">No data.</div>';return;}}
   var vd=slData.variables[vn];if(!vd)return;
@@ -1195,16 +1151,12 @@ function drawLast6Generic(c,vn,slData){{
   var comps=vd.last6_comparisons||[];
   var latestIW=slData.latest_week_iw;
   var latestDate=slData.latest_week_date||"";
-
-  // Header row: Year/Type | Week | Date | D1-D4 | D2-D4 | D3-D4 | D4
   var hdr='<tr>'+
     '<th class="lft" style="background:#0e1d2e;min-width:88px">Year / Type</th>'+
     '<th style="background:#0e1d2e;color:#90a4ae">Week</th>'+
     '<th style="background:#0e1d2e;color:#607080">Date</th>'+
     VARS.map(function(v){{return '<th style="background:#0e1d2e;color:'+VC[v]+'">'+(v===vn?'<b>'+v+'</b>':v)+'</th>';}}).join("")+
     '</tr>';
-
-  // Current year: 6 rows
   var body=rows6.map(function(r){{
     var isMostRecent=(r.iso_week===latestIW);
     return '<tr style="'+(isMostRecent?'background:#0a1f14':'')+'">'+
@@ -1214,11 +1166,7 @@ function drawLast6Generic(c,vn,slData){{
       VARS.map(function(v){{var val=r[v];return '<td style="'+(v===vn?'color:#f6e05e;font-weight:600':'')+'">'+(val!=null?val.toFixed(1)+'%':'—')+'</td>';}}).join("")+
       '</tr>';
   }}).join("");
-
-  // Separator
   body+='<tr><td colspan="'+(3+VARS.length)+'" style="background:#1a2535;padding:2px 8px;font-size:.64rem;color:#607080">↓ Same week ('+latestDate+') — comparison years</td></tr>';
-
-  // Comparison rows: last yr + analogs — SAME latest week
   comps.forEach(function(comp){{
     var isLY=comp.is_last_yr;
     body+='<tr style="'+(isLY?'background:#1a1208':'')+'">'+
@@ -1228,11 +1176,9 @@ function drawLast6Generic(c,vn,slData){{
       VARS.map(function(v){{var val=comp[v];return '<td style="'+(v===vn?'font-weight:600':'')+'">'+(val!=null?val.toFixed(1)+'%':'—')+'</td>';}}).join("")+
       '</tr>';
   }});
-
   c.innerHTML='<table><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table>';
 }}
 
-// Generic season line chart using any SL data + analogs dict
 function drawOneLineGeneric(cid,vn,slData,analogsData){{
   var c=document.getElementById(cid);if(!c)return;c.innerHTML="";
   var d=slData.variables[vn];if(!d)return;
@@ -1265,9 +1211,7 @@ function drawOneLineGeneric(cid,vn,slData,analogsData){{
     if(dash)a["stroke-dasharray"]=dash;
     tt(g.appendChild(mel("path",a)),String(yr));
   }}
-  // All historical grey
   aYrs.forEach(function(yr){{if(analogs.indexOf(yr)<0&&yr!==cYr)mkLine(yr,"#2a3848",0.7,0.5,null);}});
-  // Analogs colored dashed with end labels
   analogs.forEach(function(yr,i){{
     var col=ACOLS[i%5];mkLine(yr,col,1.8,0.88,"5,3");
     var line=ser[String(yr)];if(!line)return;
@@ -1277,7 +1221,6 @@ function drawOneLineGeneric(cid,vn,slData,analogsData){{
       g.appendChild(mtx(String(yr)+": "+lv.toFixed(0)+"%",{{x:xS(li)+5,y:yS(lv)+3,"font-size":"7.5","font-weight":"600"}},col));
     }}
   }});
-  // Current year bold
   mkLine(cYr,VC[vn]||"#68d391",2.5,1,null);
   var cl2=ser[String(cYr)];
   if(cl2){{
@@ -1287,11 +1230,9 @@ function drawOneLineGeneric(cid,vn,slData,analogsData){{
       g.appendChild(mtx(cYr+": "+lv.toFixed(1)+"%",{{x:xS(li)+5,y:yS(lv)-5,"font-size":"8","font-weight":"700"}},VC[vn]||"#68d391"));
     }}
   }}
-  // Latest week marker
   var latIdx=weeks.indexOf(slData.latest_iw);
   if(latIdx>=0){{var xx=xS(latIdx);g.appendChild(mel("line",{{x1:xx,y1:0,x2:xx,y2:ph,stroke:"#607080","stroke-width":"1","stroke-dasharray":"3,3"}}));}}
   svg.appendChild(g);c.appendChild(svg);
-  // Legend
   var leg=document.createElement("div");leg.style.cssText="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px;font-size:.65rem";
   var items=[[String(cYr),VC[vn]||"#68d391","700","solid"]];
   analogs.forEach(function(yr,i){{items.push([String(yr),ACOLS[i%5],"600","dashed"]);}});
@@ -1303,7 +1244,6 @@ function drawOneLineGeneric(cid,vn,slData,analogsData){{
   c.appendChild(leg);
 }}
 
-// TX seasonality uses generic function
 function drawSeasonCharts(){{
   var grid=document.getElementById("sg");if(!grid)return;grid.innerHTML="";
   var sel=document.getElementById("sl-var")&&document.getElementById("sl-var").value;
@@ -1324,127 +1264,6 @@ function drawLast6(){{
   drawLast6Generic(c,vn,SL);
 }}
 
-// TX/US toggle for prediction tabs
-function setGeo(tab,geo){{
-  GEO_STATE[tab]=geo;
-  var on="#1a4030",off="#1a2535",onT="#68d391",offT="#90a4ae";
-  var txBtn=document.getElementById(tab+"-tx-btn");
-  var usBtn=document.getElementById(tab+"-us-btn");
-  if(txBtn){{txBtn.style.background=geo==="TX"?on:off;txBtn.style.color=geo==="TX"?onT:offT;}}
-  if(usBtn){{usBtn.style.background=geo==="US"?on:off;usBtn.style.color=geo==="US"?onT:offT;}}
-  var rowsTX={{"wk":WK,"mo":MO,"cu":CU}};
-  var rowsUS={{"wk":WK_US,"mo":MO_US,"cu":CU_US}};
-  var rows=geo==="US"?rowsUS[tab]:rowsTX[tab];
-  var st=document.getElementById(tab+"-st");
-  if(st)st.textContent={{
-    "wk":"Weekly","mo":"Monthly","cu":"Cumulative"
-  }}[tab]+" Model — "+geo;
-  var sc_ids={{"wk":"sc-w","mo":"sc-m","cu":"sc-c"}};
-  var tbl_ids={{"wk":"tbl-w","mo":"tbl-m","cu":"tbl-c"}};
-  drawScSet(sc_ids[tab],rows||[]);
-  drawTblSet(tbl_ids[tab],rows||[],"label");
-}}
-
-window.onload=function(){{
-  // Init TX analogs
-  VARS.forEach(function(v){{var d=SL.variables[v];ANALOGS[v]=d?d.analogs.slice():[];}});
-  var sel=document.getElementById("sl-yr"),d=SL.variables["D1-D4"];
-  if(d)d.all_hist_years.forEach(function(yr){{sel.innerHTML+='<option value="'+yr+'">'+yr+'</option>';}});
-  // Init US analogs
-  initAnalogsUS();
-  // Init planted inputs
-  initPlantedInputs();
-  // Draw TX seasonality
-  drawSeasonCharts();
-  drawLast6();
-  // Draw US seasonality (shows placeholder if no US file)
-  drawSeasonChartsUS();
-  drawLast6US();
-  // Draw prediction tabs (TX by default)
-  drawScSet("sc-w",WK);drawScSet("sc-m",MO);drawScSet("sc-c",CU);
-  drawTblSet("tbl-w",WK,"label");drawTblSet("tbl-m",MO,"label");drawTblSet("tbl-c",CU,"label");
-  initBanner();
-}};
-window.onresize=function(){{
-  drawSeasonCharts();
-  drawSeasonChartsUS();
-  drawScSet("sc-w",GEO_STATE.wk==="US"?WK_US:WK);
-  drawScSet("sc-m",GEO_STATE.mo==="US"?MO_US:MO);
-  drawScSet("sc-c",GEO_STATE.cu==="US"?CU_US:CU);
-}};
-
-// ── Planted area — all states ─────────────────────────────────────────────
-function initPlantedInputs(){{
-  var container=document.getElementById("planted-inputs");
-  if(!container)return;
-  container.innerHTML="";
-  var defs=PROD.state_defaults||{{}};
-  var states=Object.keys(defs).sort().filter(function(s){{return s!=="US";}});
-  // Add US at end if present
-  if(defs["US"]||defs[PROD.us_geo||"US"]) states.push("US");
-  states.forEach(function(st){{
-    var def=defs[st]||{{}};
-    var saved=localStorage.getItem("planted_"+st);
-    var val=saved?saved:(def.plt?Math.round(def.plt):"");
-    var yr=def.year?"("+def.year+")":"";
-    var box=document.createElement("div");
-    box.style.cssText="display:flex;flex-direction:column;gap:2px;min-width:90px";
-    box.innerHTML='<span style="font-size:.66rem;color:'+(st==="TX"?"#68d391":"#90a4ae")+'">'+st+' '+yr+'</span>'+
-      '<input type="number" id="plt_'+st+'" value="'+val+'" min="0" max="20000" step="50" '+
-      'style="width:90px;background:#1a2535;border:1px solid '+(st==="TX"?"#2d6a4f":"#2d3e50")+
-      ';color:#e2e8f0;padding:3px 6px;border-radius:4px;font-size:.71rem"/>';
-    container.appendChild(box);
-  }});
-}}
-
-function savePlanted(){{
-  var defs=PROD.state_defaults||{{}};
-  var states=Object.keys(defs).sort();
-  var saved=[];
-  states.forEach(function(st){{
-    var el=document.getElementById("plt_"+st);
-    if(el&&el.value&&!isNaN(el.value)){{
-      localStorage.setItem("planted_"+st,el.value);
-      saved.push(st+":"+el.value+"K");
-    }}
-  }});
-  document.getElementById("saved-note").textContent="✓ Saved: "+saved.join(", ");
-  renderProd();
-}}
-
-function resetPlanted(){{
-  var defs=PROD.state_defaults||{{}};
-  Object.keys(defs).forEach(function(st){{
-    localStorage.removeItem("planted_"+st);
-    var el=document.getElementById("plt_"+st);
-    if(el&&defs[st]&&defs[st].plt) el.value=Math.round(defs[st].plt);
-  }});
-  document.getElementById("saved-note").textContent="↺ Reset to last year actuals.";
-  renderProd();
-}}
-
-function getPlanted(st){{
-  var v=localStorage.getItem("planted_"+st);
-  if(v&&!isNaN(v)) return parseFloat(v);
-  // Fall back to last year actual from PROD
-  var def=(PROD.state_defaults||{{}})[st];
-  return def&&def.plt?def.plt:null;
-}}
-function getTxPlanted(){{ return getPlanted("TX"); }}
-
-// ── Best model banner ─────────────────────────────────────────────────────
-function initBanner(){{
-  var b=document.getElementById("best-banner");if(!b)return;
-  if(BTX&&BTX.point!==null){{
-    b.innerHTML='🎯 <b>Best TX Prediction:</b> '+BTX.variable+' ('+BTX.model+', '+BTX.label+') '+
-      '· R²='+(BTX.r2*100).toFixed(1)+'% · Abandonment: <b style="color:#68d391">'+(BTX.point*100).toFixed(1)+
-      '%</b> ['+((BTX.lo||0)*100).toFixed(1)+'%–'+((BTX.hi||0)*100).toFixed(1)+'%] ('+CI_PCT+' CI)';
-  }}else{{b.innerHTML='⚠ No prediction available yet. Add drought data for current season.';}}
-}}
-
-// ══════════════════════════════════════════════════════════════════════════
-// SEASONALITY LINE CHARTS
-// ══════════════════════════════════════════════════════════════════════════
 function swapAnalog(){{
   var slot=parseInt(document.getElementById("sl-slot").value)||0;
   var yr=parseInt(document.getElementById("sl-yr").value);
@@ -1453,41 +1272,6 @@ function swapAnalog(){{
   drawSeasonCharts();
 }}
 
-);
-  // 3. Current year — thick solid
-  mkLine(cYr,VC[vn]||"#68d391",2.5,1,null);
-  var cl2=ser[String(cYr)];
-  if(cl2){{
-    var lv=null,li=-1;cl2.forEach(function(v,j){{if(v!==null){{lv=v;li=j;}}}});
-    if(lv!==null){{
-      g.appendChild(mel("circle",{{cx:xS(li),cy:yS(lv),r:"4",fill:VC[vn]||"#68d391"}}));
-      g.appendChild(mtx(cYr+": "+lv.toFixed(1)+"%",{{x:xS(li)+5,y:yS(lv)-5,"font-size":"8","font-weight":"700"}},VC[vn]||"#68d391"));
-    }}
-  }}
-  // Latest week marker
-  var latIdx=weeks.indexOf(SL_CURR.latest_iw);
-  if(latIdx>=0){{var xx=xS(latIdx);g.appendChild(mel("line",{{x1:xx,y1:0,x2:xx,y2:ph,stroke:"#607080","stroke-width":"1","stroke-dasharray":"3,3"}}));}}
-
-  svg.appendChild(g);c.appendChild(svg);
-
-  // Legend
-  var leg=document.createElement("div");
-  leg.style.cssText="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px;font-size:.65rem";
-  var items=[[String(cYr),VC[vn]||"#68d391","700","solid"]];
-  analogs.forEach(function(yr,i){{items.push([String(yr),ACOLS[i%5],"600","dashed"]);}});
-  items.push(["Historical","#2a3848","400","solid"]);
-  items.forEach(function(item){{
-    var lineStyle=item[3]==="dashed"?"border-top:2px dashed "+item[1]:"border-top:2px solid "+item[1];
-    leg.innerHTML+='<span style="display:flex;align-items:center;gap:2px">'+
-      '<span style="width:14px;'+lineStyle+';display:inline-block"></span>'+
-      '<span style="color:'+item[1]+';font-weight:'+item[2]+'">'+item[0]+'</span></span>';
-  }});
-  c.appendChild(leg);
-}}
-
-// ══════════════════════════════════════════════════════════════════════════
-// SCATTER + TABLE
-// ══════════════════════════════════════════════════════════════════════════
 function drawScSet(gid,rows){{
   var g=document.getElementById(gid);if(!g)return;g.innerHTML="";
   if(!rows||!rows.length){{g.innerHTML='<div style="color:#607080;padding:16px">No data.</div>';return;}}
@@ -1584,9 +1368,7 @@ function drawTblSet(tid,rows,lk){{
   c.innerHTML='<table><thead><tr><th class="lft" rowspan="2">Period</th>'+vH+'<th class="bvh" colspan="3" style="color:#c4a0f0">★ Best</th></tr><tr>'+sH+'<th class="bvs">Var</th><th class="bvs">Pred%</th><th class="bvs">'+CI_PCT+' CI</th></tr></thead><tbody>'+tb+'</tbody></table>';
 }}
 
-// ══════════════════════════════════════════════════════════════════════════
-// PRODUCTION
-// ══════════════════════════════════════════════════════════════════════════
+// ── Production ────────────────────────────────────────────────────────────
 function renderProd(){{
   var txPlt=getTxPlanted();
   var modelAb=BTX&&BTX.point!=null?BTX.point:null;
@@ -1596,13 +1378,20 @@ function renderProd(){{
   buildGridD(modelAb);
 }}
 
+function initBanner(){{
+  var b=document.getElementById("best-banner");if(!b)return;
+  if(BTX&&BTX.point!==null){{
+    b.innerHTML='🎯 <b>Best TX Prediction:</b> '+BTX.variable+' ('+BTX.model+', '+BTX.label+') '+
+      '· R²='+(BTX.r2*100).toFixed(1)+'% · Abandonment: <b style="color:#68d391">'+(BTX.point*100).toFixed(1)+
+      '%</b> ['+((BTX.lo||0)*100).toFixed(1)+'%–'+((BTX.hi||0)*100).toFixed(1)+'%] ('+CI_PCT+' CI)';
+  }}else{{b.innerHTML='⚠ No prediction available yet. Add drought data for current season.';}}
+}}
+
 function buildMatAB(){{
   var ca=document.getElementById("mA"),cb=document.getElementById("mB");
   if(!ca||!cb)return;
   var PL=PROD.period_labels;
   var periods=[1,5,10,15,20];
-
-  // Recompute matrices using current planted overrides
   function computeCell(pAb, pYld, useTxModel){{
     var total=0; var ok=true;
     var states=PROD.state_data;
@@ -1614,13 +1403,12 @@ function buildMatAB(){{
       if(!pa||!py){{ok=false;return;}}
       var ab=(st==="TX"&&useTxModel&&BTX.point!=null)?BTX.point:pa.ab;
       var yld=py.yld;
-      var plt=getPlanted(st); // use user override or last year
+      var plt=getPlanted(st);
       if(ab==null||yld==null||plt==null){{ok=false;return;}}
       total+=plt*1000*(1-ab)*yld/480000000;
     }});
     return ok?Math.round(total*1000)/1000:null;
   }}
-
   function hdr(){{
     return '<tr><th class="lft" style="min-width:60px;background:#0e1d2e">Ab↓ Yld→</th>'+
       periods.map(function(p){{return '<th style="background:#0e1d2e;color:#7fb3d3">'+PL[p]+'</th>';}}).join("")+'</tr>';
@@ -1635,8 +1423,6 @@ function buildMatAB(){{
     }}).join("");
   }}
   ca.innerHTML='<table class="mtbl"><thead>'+hdr()+'</thead><tbody>'+buildRows(false)+'</tbody></table>';
-
-    // Matrix B: TX abandonment = model, all else same as A
   var bRows=periods.map(function(pAb){{
     var cells=periods.map(function(pYld){{
       var vB=computeCell(pAb,pYld,true);
@@ -1649,8 +1435,7 @@ function buildMatAB(){{
     return '<tr><th class="lft" style="background:#111820;color:#90a4ae">'+PL[pAb]+'</th>'+cells+'</tr>';
   }}).join("");
   cb.innerHTML='<table class="mtbl"><thead>'+hdr()+'</thead><tbody>'+bRows+'</tbody></table>';
-don fixed at '+(modelAb*100).toFixed(1)+'% (model). Δ vs Matrix A shown in red/green.';
-  }}
+  document.getElementById("mB-sub").textContent='TX abandonment fixed at '+(BTX.point*100).toFixed(1)+'% (model). Δ vs Matrix A shown in red/green.';
 }}
 
 function buildGridC(txPlt,modelAb){{
@@ -1658,7 +1443,6 @@ function buildGridC(txPlt,modelAb){{
   if(!txPlt){{c.innerHTML='<div style="color:#fc8181;font-size:.7rem;padding:8px">Enter TX planted area above.</div>';return;}}
   var abR=PROD.tx_ab_range,yldR=PROD.tx_yld_range;
   if(!abR||!abR.length){{c.innerHTML='<div style="color:#607080;padding:8px;font-size:.7rem">No TX data available.</div>';return;}}
-  // Find model row
   var mRow=null;
   if(modelAb!=null){{var diffs=abR.map(function(a){{return Math.abs(a-modelAb);}});mRow=diffs.indexOf(Math.min.apply(null,diffs));}}
   var hdr='<tr><th style="text-align:left;background:#0e1d2e;min-width:55px;position:sticky;left:0">Ab%↓ Yld→</th>'+
@@ -1680,7 +1464,6 @@ function buildGridC(txPlt,modelAb){{
 function buildGridD(modelAb){{
   var c=document.getElementById("gD");if(!c)return;
   var usAb=PROD.us_ab_range,usYld=PROD.us_yld_range;
-  // US planted = sum of all state planted values (user overrides applied)
   var usPlt=0,hasAny=false;
   var defs=PROD.state_defaults||{{}};
   Object.keys(defs).filter(function(s){{return s!=="US"&&s!==PROD.us_geo;}}).forEach(function(st){{
@@ -1690,7 +1473,6 @@ function buildGridD(modelAb){{
   if(!usPlt||!usAb||!usAb.length){{
     c.innerHTML='<div style="color:#607080;padding:8px;font-size:.7rem">US data requires full all-states CSV.</div>';return;
   }}
-  // Find model row (nearest derived US abandonment when TX=modelAb)
   var mRow=null;
   if(modelAb!=null){{var diffs=usAb.map(function(a){{return Math.abs(a-modelAb);}});mRow=diffs.indexOf(Math.min.apply(null,diffs));}}
   var hdr='<tr><th style="text-align:left;background:#0e1d2e;min-width:55px;position:sticky;left:0">Ab%↓ Yld→</th>'+
@@ -1709,9 +1491,64 @@ function buildGridD(modelAb){{
     '<div style="overflow-x:auto"><table class="mtbl"><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table></div>';
 }}
 
-// ══════════════════════════════════════════════════════════════════════════
-// ANALYST SUMMARY
-// ══════════════════════════════════════════════════════════════════════════
+// ── Planted area ───────────────────────────────────────────────────────────
+function initPlantedInputs(){{
+  var container=document.getElementById("planted-inputs");
+  if(!container)return;
+  container.innerHTML="";
+  var defs=PROD.state_defaults||{{}};
+  var states=Object.keys(defs).sort().filter(function(s){{return s!=="US";}});
+  if(defs["US"]||defs[PROD.us_geo||"US"]) states.push("US");
+  states.forEach(function(st){{
+    var def=defs[st]||{{}};
+    var saved=localStorage.getItem("planted_"+st);
+    var val=saved?saved:(def.plt?Math.round(def.plt):"");
+    var yr=def.year?"("+def.year+")":"";
+    var box=document.createElement("div");
+    box.style.cssText="display:flex;flex-direction:column;gap:2px;min-width:90px";
+    box.innerHTML='<span style="font-size:.66rem;color:'+(st==="TX"?"#68d391":"#90a4ae")+'">'+st+' '+yr+'</span>'+
+      '<input type="number" id="plt_'+st+'" value="'+val+'" min="0" max="20000" step="50" '+
+      'style="width:90px;background:#1a2535;border:1px solid '+(st==="TX"?"#2d6a4f":"#2d3e50")+
+      ';color:#e2e8f0;padding:3px 6px;border-radius:4px;font-size:.71rem"/>';
+    container.appendChild(box);
+  }});
+}}
+
+function savePlanted(){{
+  var defs=PROD.state_defaults||{{}};
+  var states=Object.keys(defs).sort();
+  var saved=[];
+  states.forEach(function(st){{
+    var el=document.getElementById("plt_"+st);
+    if(el&&el.value&&!isNaN(el.value)){{
+      localStorage.setItem("planted_"+st,el.value);
+      saved.push(st+":"+el.value+"K");
+    }}
+  }});
+  document.getElementById("saved-note").textContent="✓ Saved: "+saved.join(", ");
+  renderProd();
+}}
+
+function resetPlanted(){{
+  var defs=PROD.state_defaults||{{}};
+  Object.keys(defs).forEach(function(st){{
+    localStorage.removeItem("planted_"+st);
+    var el=document.getElementById("plt_"+st);
+    if(el&&defs[st]&&defs[st].plt) el.value=Math.round(defs[st].plt);
+  }});
+  document.getElementById("saved-note").textContent="↺ Reset to last year actuals.";
+  renderProd();
+}}
+
+function getPlanted(st){{
+  var v=localStorage.getItem("planted_"+st);
+  if(v&&!isNaN(v)) return parseFloat(v);
+  var def=(PROD.state_defaults||{{}})[st];
+  return def&&def.plt?def.plt:null;
+}}
+function getTxPlanted(){{ return getPlanted("TX"); }}
+
+// ── Summary ────────────────────────────────────────────────────────────────
 function refreshSummary(){{
   var txPlt=getTxPlanted();
   var modelAb=BTX&&BTX.point!=null?BTX.point:null;
@@ -1720,8 +1557,6 @@ function refreshSummary(){{
   var hiPct=BTX.hi!=null?((BTX.hi||0)*100).toFixed(1)+"%":"?";
   var r2=BTX.r2!=null?(BTX.r2*100).toFixed(1)+"%":"N/A";
   var nWk=WK.length;var latest=WK.length?WK[WK.length-1].date:"N/A";
-
-  // Find weeks with significant models
   var sigWks=[];
   WK.forEach(function(row){{
     VARS.forEach(function(v){{
@@ -1730,23 +1565,18 @@ function refreshSummary(){{
     }});
   }});
   var sigTxt=sigWks.slice(0,3).join(", ")||"none at p<0.10 yet";
-
   document.getElementById("ps1").value=SUMMARY.seasonality;
   document.getElementById("ps2").value="Weekly model: "+nWk+" weeks available through "+latest+
-    ". Significant: "+sigTxt+".\n"+SUMMARY.weekly+"\n"+SUMMARY.monthly+"\n"+SUMMARY.cumulative;
+    ". Significant: "+sigTxt+".";
   document.getElementById("ps3").value="Best model: "+BTX.variable+" ("+BTX.model+") at "+BTX.label+
-    ", R²="+r2+". TX abandonment prediction: "+modelPct+" ("+CI_PCT+" CI: "+loPct+"–"+hiPct+")."+
-    (txPlt?" TX planted area: "+txPlt+"K acres. Implied TX production (5yr avg yield): "+(txPlt?(txPlt*1000*(1-modelAb)*(PROD.state_data&&PROD.state_data.TX&&PROD.state_data.TX.periods&&PROD.state_data.TX.periods[5]&&PROD.state_data.TX.periods[5].yld||650)/480000000).toFixed(2)+" mn bales.":"N/A"):"");
+    ", R²="+r2+". TX abandonment prediction: "+modelPct+" ("+CI_PCT+" CI: "+loPct+"–"+hiPct+").";
   document.getElementById("ps4").value=SUMMARY.production;
-  document.getElementById("ps5").value="Key risks: (1) Low R² ("+r2+") means wide CI — drought alone has limited predictive power. "+
-    "(2) Model trained on ~25 years; extreme events may be underweighted. "+
-    "(3) TX planted area estimate may not reflect final USDA NASS figure. "+
-    "(4) Yield assumptions based on historical averages and may not capture current crop conditions.";
+  document.getElementById("ps5").value="Key risks: (1) Low R² ("+r2+") means wide CI. "+
+    "(2) Model trained on historical data; extreme events may be underweighted. "+
+    "(3) TX planted area estimate may not reflect final USDA NASS figure.";
 }}
 
-// ══════════════════════════════════════════════════════════════════════════
-// DIAGNOSTICS
-// ══════════════════════════════════════════════════════════════════════════
+// ── Diagnostics ────────────────────────────────────────────────────────────
 function drawDiag(){{
   var g=document.getElementById("dg");if(!g)return;g.innerHTML="";
   VARS.forEach(function(v){{
@@ -1793,19 +1623,37 @@ function drawDiagB(cid,lbls,wr,mr,cr,col){{
   c.appendChild(svg);
 }}
 
-// ══════════════════════════════════════════════════════════════════════════
-// PRINT / PDF
-// ══════════════════════════════════════════════════════════════════════════
+// ── Print ──────────────────────────────────────────────────────────────────
 function printPDF(){{
-  // Ensure summary is up to date before printing
   refreshSummary();
-  // Show all panels temporarily for print
   document.querySelectorAll(".panel").forEach(function(p){{p.style.display="block";}});
   window.print();
-  // Restore
   document.querySelectorAll(".panel").forEach(function(p){{p.style.display="";}});
   document.querySelectorAll(".panel.active").forEach(function(p){{p.style.display="block";}});
 }}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+window.onload=function(){{
+  VARS.forEach(function(v){{var d=SL.variables[v];ANALOGS[v]=d?d.analogs.slice():[];}});
+  var sel=document.getElementById("sl-yr"),d=SL.variables["D1-D4"];
+  if(d)d.all_hist_years.forEach(function(yr){{sel.innerHTML+='<option value="'+yr+'">'+yr+'</option>';}});
+  initAnalogsUS();
+  initPlantedInputs();
+  drawSeasonCharts();
+  drawLast6();
+  drawSeasonChartsUS();
+  drawLast6US();
+  drawScSet("sc-w",WK);drawScSet("sc-m",MO);drawScSet("sc-c",CU);
+  drawTblSet("tbl-w",WK,"label");drawTblSet("tbl-m",MO,"label");drawTblSet("tbl-c",CU,"label");
+  initBanner();
+}};
+window.onresize=function(){{
+  drawSeasonCharts();
+  drawSeasonChartsUS();
+  drawScSet("sc-w",GEO_STATE.wk==="US"?WK_US:WK);
+  drawScSet("sc-m",GEO_STATE.mo==="US"?MO_US:MO);
+  drawScSet("sc-c",GEO_STATE.cu==="US"?CU_US:CU);
+}};
 </script>
 </body>
 </html>"""
