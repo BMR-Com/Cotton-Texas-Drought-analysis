@@ -2,13 +2,11 @@ name: Update Cotton Drought Dashboard
 
 on:
   schedule:
-    # Every Tuesday at 14:00 UTC
-    # (USDA drought monitor updates Thursdays — Tuesday catches prior week)
     - cron: "0 14 * * 2"
-  workflow_dispatch:       # manual trigger from Actions tab
+  workflow_dispatch:
   push:
     paths:
-      - "data/**"          # re-run whenever either CSV is updated
+      - "data/**"
 
 permissions:
   contents: write
@@ -30,20 +28,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run analysis — generate dashboard HTML
-        run: python process_data.py
-
-      - name: Move generated HTML to docs/
+      - name: Ensure docs folder exists
         run: |
           mkdir -p docs
-          mv cotton_drought_dashboard.html docs/cotton_drought_dashboard.html
           touch docs/.nojekyll
+
+      - name: Run analysis — generate docs/index.html
+        run: python process_data.py
 
       - name: Commit and push updated dashboard
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/cotton_drought_dashboard.html docs/.nojekyll
+          git add docs/index.html docs/.nojekyll
           git diff --cached --quiet || \
             git commit -m "chore: regenerate dashboard [$(date -u +%Y-%m-%d)]"
           git push
