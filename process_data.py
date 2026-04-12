@@ -1162,7 +1162,8 @@ function drawLast6Generic(c,vn,slData){{
   function fmtCell(val,refVal,rowColor){{
     if(val==null)return '<td style="padding:5px 10px;text-align:right;color:#3a4a5a;border-bottom:1px solid #1a2535">—</td>';
     var diff=(refVal!=null)?(val-refVal):null;
-    var ds=diff!=null?' <span style="font-size:.6rem;color:'+(diff>0.05?'#fc8181':diff<-0.05?'#68d391':'#607080')+'">('+(diff>=0?'+':'')+diff.toFixed(1)+')</span>':'';    return '<td style="padding:5px 10px;text-align:right;color:'+rowColor+';font-weight:600;border-bottom:1px solid #1a2535;white-space:nowrap">'+val.toFixed(1)+'%'+ds+'</td>';
+    var ds=diff!=null?' <span style="font-size:.6rem;color:'+(diff>0.05?'#fc8181':diff<-0.05?'#68d391':'#607080')+'">('+(diff>=0?'+':'')+diff.toFixed(1)+')</span>':'';
+    return '<td style="padding:5px 10px;text-align:right;color:'+rowColor+';font-weight:600;border-bottom:1px solid #1a2535;white-space:nowrap">'+val.toFixed(1)+'%'+ds+'</td>';
   }}
 
   var thead='<thead><tr style="background:#080f18">'+
@@ -1170,7 +1171,7 @@ function drawLast6Generic(c,vn,slData){{
     '<th style="padding:6px 10px;text-align:right;color:#405060;font-size:.65rem;border-bottom:2px solid #2d4060;white-space:nowrap">Date / Wk</th>'+
     VARS.map(function(v){{
       return '<th style="padding:6px 10px;text-align:right;color:'+VC[v]+';font-size:.7rem;font-weight:'+(v===vn?'700':'500')+
-        ';border-bottom:2px solid #2d4060;white-space:nowrap">'+(v===vn?'▶ ':''')+v+'</th>';
+        ';border-bottom:2px solid #2d4060;white-space:nowrap">'+(v===vn?'&#9658; ':'')+v+'</th>';
     }}).join('')+
     '</tr></thead>';
 
@@ -1184,7 +1185,7 @@ function drawLast6Generic(c,vn,slData){{
     tbody+='<tr style="background:'+bg+'">';
     tbody+='<td style="padding:5px 10px;color:'+(isCurr?'#68d391':'#7090a0')+
       ';font-weight:'+(isCurr?'700':'400')+';border-bottom:1px solid #1a2535;white-space:nowrap">'+
-      (isCurr?'★ ':''')+currYr+' — '+(r.label||('Wk'+r.iso_week))+'</td>';
+      (isCurr?'&#9733; ':'')+currYr+' — '+(r.label||('Wk'+r.iso_week))+'</td>';
     tbody+='<td style="padding:5px 10px;text-align:right;color:#405060;font-size:.64rem;border-bottom:1px solid #1a2535;white-space:nowrap">'+
       (r.date||'')+'</td>';
     VARS.forEach(function(v){{
