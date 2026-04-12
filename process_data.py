@@ -204,7 +204,7 @@ def get_tx(cotton):
 
 def get_curr_yr(ab, drought):
     ly = int(drought["mkt_year"].max())
-    return ly if ly not in ab.index else ly
+    return ly if ly not in ab.index else ly + 1
 
 def get_hist(ab, drought, curr_yr):
     return drought[
@@ -303,17 +303,29 @@ def build_season_lines(drought, geo_label='TX', n_years=20):
     max_yr   = drought["cal_year"].max()
     curr_yr  = int(drought["mkt_year"].max())
     min_yr   = max_yr - n_years + 1
-    s_weeks  = sorted(w for w in drought["iso_week"].unique() if 14<=w<=43)
-    wlabels  = [week_label(w) for w in s_weeks]
+    # Full calendar year: all available iso weeks (not just season months)
+    # We reload without season filter — use all weeks present in the raw series
+    all_weeks_in_data = sorted(drought["iso_week"].unique())
+    # Use week 1–52 order; map each to a month label
+    s_weeks  = all_weeks_in_data
+    def wk_to_label(iw):
+        ref = pd.Timestamp("2019-01-01") + pd.to_timedelta(int(iw)*7-4, unit="D")
+        mn  = ref.strftime("%b")
+        wn  = (ref.day-1)//7+1
+        return f"{mn} W{wn}"
+    wlabels  = [wk_to_label(w) for w in s_weeks]
     curr_df  = drought[drought["mkt_year"]==curr_yr].sort_values("Week")
     lat_iw   = int(curr_df["iso_week"].max()) if not curr_df.empty else s_weeks[-1]
     hist_yrs = sorted(y for y in drought["cal_year"].unique()
                       if min_yr<=y<=max_yr and y!=curr_yr)
     last_yr  = curr_yr - 1
+    # Last 5 calendar years always included as toggleable
+    last5_yrs = sorted(y for y in range(curr_yr-5, curr_yr) if y in drought["cal_year"].unique())
 
     out = {"geo":geo_label, "weeks":wlabels, "iso_weeks":[int(w) for w in s_weeks],
            "curr_yr":int(curr_yr), "latest_iw":int(lat_iw),
-           "last_yr":int(last_yr), "variables":{},
+           "last_yr":int(last_yr), "last5_yrs":[int(y) for y in last5_yrs],
+           "variables":{},
            "last6_weeks":[], "last6_comparisons":[]}
 
     # Last 6 current-year weeks
@@ -331,7 +343,7 @@ def build_season_lines(drought, geo_label='TX', n_years=20):
     out["last6_iws"] = [int(r["iso_week"]) for _,r in curr_df.tail(6).iterrows()]
 
     for v in DROUGHT_VARS:
-        # Build year series
+        # Build year series — full calendar year per cal_year
         series={}
         for yr in hist_yrs+[curr_yr]:
             yr_df=drought[drought["cal_year"]==yr]
@@ -410,17 +422,20 @@ def build_production(cotton, best_tx):
         for P in PERIODS:
             rec=sdf[sdf["mkt_year"]>=max_yr-P+1]
             if rec.empty: sd["periods"][P]=None; continue
-            def g(col):
-                if col not in rec.columns: return None
-                v=rec[col].dropna()
-                return safe(float(v.mean()), 2) if len(v) else None
+            def _gs(col, fn, _rec=rec):
+                if col not in _rec.columns: return None
+                v=_rec[col].dropna()
+                return safe(float(fn(v)), 2) if len(v) else None
             sd["periods"][P]={
-                "ab":  g("abandonment"),
-                "yld": g("upland_cotton_lint_yield"),
-                "plt": g("upland_cotton_planted_acreage"),
-                "prd": g("upland_cotton_production"),
+                "ab":      _gs("abandonment",              lambda v: v.mean()),
+                "ab_min":  _gs("abandonment",              lambda v: v.min()),
+                "ab_max":  _gs("abandonment",              lambda v: v.max()),
+                "yld":     _gs("upland_cotton_lint_yield", lambda v: v.mean()),
+                "yld_min": _gs("upland_cotton_lint_yield", lambda v: v.min()),
+                "yld_max": _gs("upland_cotton_lint_yield", lambda v: v.max()),
+                "plt":     _gs("upland_cotton_planted_acreage", lambda v: v.mean()),
+                "prd":     _gs("upland_cotton_production", lambda v: v.mean()),
             }
-            # Last year actual
         lr=sdf.iloc[-1]
         sd["last_yr_actual"]={
             "year":int(lr["mkt_year"]),
@@ -430,31 +445,7 @@ def build_production(cotton, best_tx):
         }
         state_data[state]=sd
 
-    def prod_mn_bales(plt_k, ab, yld):
-        """plt_k = 1000 acres, yld = lb/acre → mn 480-lb bales"""
-        if plt_k is None or ab is None or yld is None: return None
-        return round(plt_k * 1000 * (1-ab) * yld / 480_000_000, 3)
-
-    # Matrix A: 5×5 — rows=abandon period, cols=yield period, all states historical
-    # Matrix B: same but TX abandonment = model prediction
-    matA, matB = {}, {}
     model_ab = best_tx.get("point")
-
-    for P_ab in PERIODS:
-        matA[P_ab]={} ; matB[P_ab]={}
-        for P_yld in PERIODS:
-            total_a = 0.0; total_b = 0.0; ok=True
-            for st, sd in state_data.items():
-                pa = sd["periods"].get(P_ab)
-                py = sd["periods"].get(P_yld)
-                if not pa or not py: ok=False; break
-                ab_a  = pa["ab"];  ab_b = (model_ab if st=="TX" else pa["ab"])
-                yld   = py["yld"]; plt  = pa["plt"]
-                if ab_a is None or yld is None or plt is None: ok=False; break
-                total_a += plt * 1000 * (1-ab_a)  * yld / 480_000_000
-                total_b += plt * 1000 * (1-ab_b)  * yld / 480_000_000
-            matA[P_ab][P_yld] = round(total_a,3) if ok else None
-            matB[P_ab][P_yld] = round(total_b,3) if ok else None
 
     # TX abandonment range for Grid C (last 10 yrs, 5% steps)
     tx_hist = cotton[(cotton["geography"]=="TX") & (cotton["mkt_year"]>=max_yr-9)]
@@ -532,8 +523,6 @@ def build_production(cotton, best_tx):
     return {
         "state_data":     state_data,
         "state_defaults": state_defaults,
-        "matA":           {str(k):{str(k2):v2 for k2,v2 in v.items()} for k,v in matA.items()},
-        "matB":           {str(k):{str(k2):v2 for k2,v2 in v.items()} for k,v in matB.items()},
         "tx_ab_range":    tx_ab_range,
         "tx_yld_range":   tx_yld_range,
         "us_ab_range":    us_ab_range,
@@ -580,9 +569,7 @@ def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought)
 
     # Production context
     has_ms = prod.get("has_multi_state", False)
-    matA_5x5 = prod.get("matA",{})
-    mid_cell = matA_5x5.get("5",{}).get("5")
-    prod_note = f"5yr×5yr avg US production estimate: {mid_cell:.2f} mn bales." if mid_cell else "Production data requires full all-states CSV."
+    prod_note = "Production data requires full all-states CSV." if not prod.get("has_multi_state") else "See Production tab for 13×13 scenario matrices."
 
     sections = {
         "seasonality": (
@@ -744,19 +731,37 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 .nbox{{background:#1a2535;border-left:3px solid #68d391;padding:7px 10px;border-radius:0 5px 5px 0;font-size:.73rem;color:#90c4ae;margin:7px 0;line-height:1.6}}
 /* Print styles */
 @media print{{
-  body{{background:white;color:black;font-size:10pt}}
-  .tabs,.hdr .badge,.btn,.btn-pdf,.ctrls,.plant-box .hint{{display:none!important}}
-  .panel{{display:block!important;page-break-after:always;padding:8px}}
-  .hdr{{background:none;border-bottom:2px solid #2d6a4f;padding:6px 0}}
-  .hdr h1{{color:black;font-size:14pt}}
-  .hdr p,.meta{{color:#444;font-size:8pt}}
-  .st{{color:#2d6a4f}}
+  body{{background:white;color:black;font-size:9pt;margin:0}}
+  .tabs,.hdr .badge,.btn,.btn-pdf,.ctrls,.plant-box .hint,.summary-box{{display:none!important}}
+  /* Show all panels for print */
+  .panel{{display:block!important;padding:6px 10px}}
+  /* Page breaks between tabs */
+  #t1{{page-break-after:always}}
+  #t2{{page-break-after:always}}
+  /* Weekly, Monthly, Cumulative: TX charts page 1, US charts + table page 2 */
+  .sc-grid-tx-print{{page-break-after:always}}
+  #t3,#t4,#t5{{page-break-after:always}}
+  /* Production: 2 pages — matrices page 1, grids page 2 */
+  .prod-matrices-print{{page-break-after:always}}
+  #t6{{page-break-after:always}}
+  /* Hide remaining tabs (Summary, Diagnostics) from PDF */
+  #t7,#t8{{display:none!important}}
+  .hdr{{background:none!important;border-bottom:2px solid #2d6a4f;padding:4px 0}}
+  .hdr h1{{color:black;font-size:12pt;font-weight:700}}
+  .hdr p,.meta{{color:#444;font-size:7.5pt}}
+  .st{{color:#2d6a4f;font-size:9pt;font-weight:700;margin:8px 0 2px}}
+  .sn{{font-size:7pt;color:#555;margin-bottom:5px}}
+  .chart-grid,.sc-grid,.dg-grid{{grid-template-columns:1fr 1fr;gap:8px}}
+  .mat-grid{{grid-template-columns:1fr 1fr}}
+  .chart-card,.sc-card{{border:1px solid #ccc;padding:5px}}
+  svg{{max-width:100%;height:auto}}
   table,svg{{break-inside:avoid}}
-  .mat-grid,.chart-grid,.sc-grid,.dg-grid{{grid-template-columns:1fr 1fr}}
-  .mtbl th,.mtbl td{{border-color:#ccc;color:black}}
+  .tw{{overflow:visible}}
+  .mtbl th,.mtbl td{{border-color:#ccc;color:black;padding:2px 5px}}
   .mtbl thead th{{background:#e8f4e8!important;color:black!important}}
   .cell-model{{background:#d4edda!important;color:darkgreen!important}}
-  tbody tr:nth-child(even){{background:#f9f9f9!important}}
+  tbody tr:nth-child(even){{background:#f5f5f5!important}}
+  td,th{{font-size:7.5pt}}
 }}
 </style>
 </head>
@@ -822,8 +827,8 @@ td.bc{{color:#9070c0;font-size:.65rem}}
     <button class="btn" onclick="swapAnalog()">Swap Year</button>
   </div>
   <div id="sg" class="chart-grid"></div>
-  <div class="st">Last 6 Weeks — Current vs Analogs</div>
-  <div class="sn">Current season last 6 weeks, plus same 6-week period from last year and top 5 analog years.</div>
+  <div class="st">Comparative Summary — 4-Week Rolling · Year-Ago · Historical Extremes · Analog Years at Same Calendar Week</div>
+  <div class="sn">Current &amp; recent readings vs same week last year, all-time historical extremes, and top 5 analog years with difference vs current in brackets.</div>
   <div class="ctrl" style="margin-bottom:8px"><span>Variable</span>
     <select id="l6-var" onchange="drawLast6()">
       <option value="D1-D4">D1-D4</option><option value="D2-D4">D2-D4</option>
@@ -864,7 +869,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
     <button class="btn" onclick="swapAnalogUS()">Swap Year</button>
   </div>
   <div id="sg-us" class="chart-grid"></div>
-  <div class="st">Last 6 Weeks — US Drought (Latest Week Comparison)</div>
+  <div class="st">Comparative Summary — US Drought · 4-Week Rolling · Year-Ago · Historical Extremes · Analog Years</div>
   <div class="ctrls">
     <div class="ctrl"><span>Variable</span>
       <select id="l6-var-us" onchange="drawLast6US()">
@@ -884,18 +889,13 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 
 <!-- ═══ TAB 3: WEEKLY ═════════════════════════════════════════════════════ -->
 <div id="t3" class="panel">
-  <div class="ctrls">
-    <div class="ctrl"><span>Geography</span>
-      <div style="display:flex;border:1px solid #2d3e50;border-radius:5px;overflow:hidden">
-        <button id="wk-tx-btn" class="btn" style="border-radius:0;border:none;background:#1a4030;color:#68d391" onclick="setGeo('wk','TX')">TX</button>
-        <button id="wk-us-btn" class="btn" style="border-radius:0;border:none;background:#1a2535;color:#90a4ae" onclick="setGeo('wk','US')">US</button>
-      </div>
-    </div>
-  </div>
-  <div id="wk-st" class="st">Weekly Model — TX</div>
+  <div class="st">Weekly Model — TX (4 Variables)</div>
   <div class="sn">Predictor = that exact week's drought %. Latest available week shown. ★ = current season ({ci_pct}% CI).</div>
-  <div class="sc-grid" id="sc-w"></div>
-  <div class="st">Weekly Model — Prediction Table</div>
+  <div class="sc-grid" id="sc-w-tx"></div>
+  <div class="st" style="margin-top:16px">Weekly Model — US (4 Variables)</div>
+  <div class="sn">US drought vs US abandonment regression.</div>
+  <div class="sc-grid" id="sc-w-us"></div>
+  <div class="st">Weekly Model — Prediction Table (TX)</div>
   <div class="tw"><div id="tbl-w"></div></div>
   <div style="font-size:.65rem;color:#405060;margin-top:4px">R²: <span style="color:#68d391">green p&lt;0.05</span> · <span style="color:#f6e05e">yellow p&lt;0.10</span> · <span style="color:#607080">grey n.s.</span></div>
   <div class="summary-box" style="margin-top:12px">
@@ -906,18 +906,13 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 
 <!-- ═══ TAB 4: MONTHLY ════════════════════════════════════════════════════ -->
 <div id="t4" class="panel">
-  <div class="ctrls">
-    <div class="ctrl"><span>Geography</span>
-      <div style="display:flex;border:1px solid #2d3e50;border-radius:5px;overflow:hidden">
-        <button id="mo-tx-btn" class="btn" style="border-radius:0;border:none;background:#1a4030;color:#68d391" onclick="setGeo('mo','TX')">TX</button>
-        <button id="mo-us-btn" class="btn" style="border-radius:0;border:none;background:#1a2535;color:#90a4ae" onclick="setGeo('mo','US')">US</button>
-      </div>
-    </div>
-  </div>
-  <div id="mo-st" class="st">Monthly Model — TX</div>
+  <div class="st">Monthly Model — TX (4 Variables)</div>
   <div class="sn">Predictor = average drought for that calendar month. Latest available month shown.</div>
-  <div class="sc-grid" id="sc-m"></div>
-  <div class="st">Monthly Model — Prediction Table</div>
+  <div class="sc-grid" id="sc-m-tx"></div>
+  <div class="st" style="margin-top:16px">Monthly Model — US (4 Variables)</div>
+  <div class="sn">US drought monthly average vs US abandonment.</div>
+  <div class="sc-grid" id="sc-m-us"></div>
+  <div class="st">Monthly Model — Prediction Table (TX)</div>
   <div class="tw"><div id="tbl-m"></div></div>
   <div class="summary-box" style="margin-top:12px">
     <h3>📝 Analyst Notes — Monthly Model</h3>
@@ -927,18 +922,13 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 
 <!-- ═══ TAB 5: CUMULATIVE ═════════════════════════════════════════════════ -->
 <div id="t5" class="panel">
-  <div class="ctrls">
-    <div class="ctrl"><span>Geography</span>
-      <div style="display:flex;border:1px solid #2d3e50;border-radius:5px;overflow:hidden">
-        <button id="cu-tx-btn" class="btn" style="border-radius:0;border:none;background:#1a4030;color:#68d391" onclick="setGeo('cu','TX')">TX</button>
-        <button id="cu-us-btn" class="btn" style="border-radius:0;border:none;background:#1a2535;color:#90a4ae" onclick="setGeo('cu','US')">US</button>
-      </div>
-    </div>
-  </div>
-  <div id="cu-st" class="st">Cumulative Model — TX</div>
+  <div class="st">Cumulative Model — TX (4 Variables)</div>
   <div class="sn">Predictor = running average drought from Apr W1 through that week.</div>
-  <div class="sc-grid" id="sc-c"></div>
-  <div class="st">Cumulative Model — Prediction Table</div>
+  <div class="sc-grid" id="sc-c-tx"></div>
+  <div class="st" style="margin-top:16px">Cumulative Model — US (4 Variables)</div>
+  <div class="sn">US cumulative drought average vs US abandonment.</div>
+  <div class="sc-grid" id="sc-c-us"></div>
+  <div class="st">Cumulative Model — Prediction Table (TX)</div>
   <div class="tw"><div id="tbl-c"></div></div>
   <div class="summary-box" style="margin-top:12px">
     <h3>📝 Analyst Notes — Cumulative Model</h3>
@@ -965,19 +955,19 @@ td.bc{{color:#9070c0;font-size:.65rem}}
   <!-- Matrix A & B -->
   <div class="st">Production Scenario Matrices — US Total (mn 480-lb bales)</div>
   <div class="sn">
-    Rows = historical avg abandonment period · Cols = historical avg yield period · Cell = sum of all states' production.<br>
-    <b>Matrix A</b>: all states use their own historical avgs &nbsp;·&nbsp;
-    <b>Matrix B</b>: TX abandonment fixed at model prediction <span style="color:#68d391">★</span>, other states unchanged.
+    Rows = 13 abandonment scenarios (avg/min/max × period) · Cols = 13 yield scenarios (avg/min/max × period) · Cell = sum of all states' production.<br>
+    <b>Matrix A</b>: all states use their own historical stats &nbsp;·&nbsp;
+    <b>Matrix B</b>: TX abandonment fixed at model prediction <span style="color:#68d391">★</span>, all other stats same as A. Δ shown in red/green.
   </div>
-  <div class="mat-grid">
-    <div class="mat-card">
+  <div style="margin-bottom:14px">
+    <div class="mat-card" style="margin-bottom:12px">
       <h3>Matrix A — All Historical</h3>
-      <div class="sub" id="mA-sub">Rows = abandonment period · Cols = yield period</div>
+      <div class="sub" id="mA-sub">Rows = abandonment scenario · Cols = yield scenario · all states use own history</div>
       <div id="mA"></div>
     </div>
     <div class="mat-card">
-      <h3>Matrix B — TX from Model ★</h3>
-      <div class="sub" id="mB-sub">TX abandonment = regression prediction; other states unchanged</div>
+      <h3>Matrix B — TX Abandonment from Model ★</h3>
+      <div class="sub" id="mB-sub">TX abandonment = regression prediction; other states unchanged. Δ vs Matrix A shown.</div>
       <div id="mB"></div>
     </div>
   </div>
@@ -1057,7 +1047,7 @@ var VC={{"D1-D4":"#68d391","D2-D4":"#f6e05e","D3-D4":"#fc8181","D4":"#d6bcfa"}};
 var VBG={{"D1-D4":"#0a1f14","D2-D4":"#1f1a08","D3-D4":"#1f0a0a","D4":"#130a1f"}};
 var MC={{"weekly":"#68d391","monthly":"#f6e05e","cumulative":"#90a0ff"}};
 var ACOLS=["#ff6b6b","#ffd93d","#6bcb77","#4d96ff","#c77dff"];
-var ANALOGS={{}};var ANALOGS_US={{}};var GEO_STATE={{"wk":"TX","mo":"TX","cu":"TX"}};
+var ANALOGS={{}};var ANALOGS_US={{}};
 
 // ── Tabs ──────────────────────────────────────────────────────────────────
 function showTab(id){{
@@ -1088,12 +1078,9 @@ function sp(cx,cy,or_,ir,pts){{
   var d="";for(var i=0;i<pts*2;i++){{var r=i%2===0?or_:ir,a=(Math.PI/pts)*i-Math.PI/2;d+=(i===0?"M":"L")+(cx+r*Math.cos(a)).toFixed(2)+","+(cy+r*Math.sin(a)).toFixed(2);}}return d+"Z";
 }}
 
-// ── Geography state ────────────────────────────────────────────────────────
+// ── Geography state (seasonality toggle only — Weekly/Monthly/Cumulative always show both) ──
 var SL_GEO = "TX";
 function getSlData(){{ return SL_GEO==="US"?SL_US:SL; }}
-function getWkData(){{ return GEO_STATE.wk==="US"?WK_US:WK; }}
-function getMoData(){{ return GEO_STATE.mo==="US"?MO_US:MO; }}
-function getCuData(){{ return GEO_STATE.cu==="US"?CU_US:CU; }}
 
 function setSlGeo(geo){{
   SL_GEO=geo;
@@ -1106,24 +1093,6 @@ function setSlGeo(geo){{
   }}
   VARS.forEach(function(v){{var dd=(geo==="US"?SL_US:SL).variables[v];ANALOGS[v]=dd?dd.analogs.slice():[];}});
   drawSeasonCharts();drawLast6();
-}}
-
-function setGeo(tab,geo){{
-  GEO_STATE[tab]=geo;
-  var on="#1a4030",off="#1a2535",onT="#68d391",offT="#90a4ae";
-  var txBtn=document.getElementById(tab+"-tx-btn");
-  var usBtn=document.getElementById(tab+"-us-btn");
-  if(txBtn){{txBtn.style.background=geo==="TX"?on:off;txBtn.style.color=geo==="TX"?onT:offT;}}
-  if(usBtn){{usBtn.style.background=geo==="US"?on:off;usBtn.style.color=geo==="US"?onT:offT;}}
-  var rowsTX={{"wk":WK,"mo":MO,"cu":CU}};
-  var rowsUS={{"wk":WK_US,"mo":MO_US,"cu":CU_US}};
-  var rows=geo==="US"?rowsUS[tab]:rowsTX[tab];
-  var st=document.getElementById(tab+"-st");
-  if(st)st.textContent={{"wk":"Weekly","mo":"Monthly","cu":"Cumulative"}}[tab]+" Model — "+geo;
-  var sc_ids={{"wk":"sc-w","mo":"sc-m","cu":"sc-c"}};
-  var tbl_ids={{"wk":"tbl-w","mo":"tbl-m","cu":"tbl-c"}};
-  drawScSet(sc_ids[tab],rows||[]);
-  drawTblSet(tbl_ids[tab],rows||[],"label");
 }}
 
 function setGeoBtn(txId,usId,geo){{
@@ -1181,33 +1150,84 @@ function drawLast6Generic(c,vn,slData){{
   var rows6=slData.last6_weeks||[];
   var comps=vd.last6_comparisons||[];
   var latestIW=slData.latest_week_iw;
-  var latestDate=slData.latest_week_date||"";
-  var hdr='<tr>'+
-    '<th class="lft" style="background:#0e1d2e;min-width:88px">Year / Type</th>'+
-    '<th style="background:#0e1d2e;color:#90a4ae">Week</th>'+
-    '<th style="background:#0e1d2e;color:#607080">Date</th>'+
-    VARS.map(function(v){{return '<th style="background:#0e1d2e;color:'+VC[v]+'">'+(v===vn?'<b>'+v+'</b>':v)+'</th>';}}).join("")+
-    '</tr>';
-  var body=rows6.map(function(r){{
-    var isMostRecent=(r.iso_week===latestIW);
-    return '<tr style="'+(isMostRecent?'background:#0a1f14':'')+'">'+
-      '<td class="lft" style="color:#68d391">'+(isMostRecent?'★ ':'')+slData.curr_yr+'</td>'+
-      '<td>'+(r.label||'')+'</td>'+
-      '<td style="color:#607080;font-size:.64rem">'+(r.date||'')+'</td>'+
-      VARS.map(function(v){{var val=r[v];return '<td style="'+(v===vn?'color:#f6e05e;font-weight:600':'')+'">'+(val!=null?val.toFixed(1)+'%':'—')+'</td>';}}).join("")+
-      '</tr>';
-  }}).join("");
-  body+='<tr><td colspan="'+(3+VARS.length)+'" style="background:#1a2535;padding:2px 8px;font-size:.64rem;color:#607080">↓ Same week ('+latestDate+') — comparison years</td></tr>';
-  comps.forEach(function(comp){{
-    var isLY=comp.is_last_yr;
-    body+='<tr style="'+(isLY?'background:#1a1208':'')+'">'+
-      '<td class="lft" style="color:'+(isLY?'#f6e05e':'#90a4ae')+'">'+(isLY?'⬅ ':'')+comp.year+(comp.rmse!=null?' (RMSE='+comp.rmse+')':'')+' '+slData.geo+'</td>'+
-      '<td style="color:#607080">Wk '+comp.iso_week+'</td>'+
-      '<td style="color:#607080;font-size:.64rem">—</td>'+
-      VARS.map(function(v){{var val=comp[v];return '<td style="'+(v===vn?'font-weight:600':'')+'">'+(val!=null?val.toFixed(1)+'%':'—')+'</td>';}}).join("")+
+  var currYr=slData.curr_yr;
+
+  // Split comparisons: last year vs analogs
+  var lyComp=comps.find(function(x){{return x.is_last_yr;}})||null;
+  var analogComps=comps.filter(function(x){{return !x.is_last_yr;}}).slice(0,5);
+
+  // Column header: Week/Date + 4 drought vars
+  var html='<div style="overflow-x:auto">';
+  html+='<div style="font-size:.65rem;color:#607080;margin-bottom:4px">★ = current week · Diff vs current week in brackets · all values % of cotton area in drought</div>';
+  html+='<table style="width:100%;border-collapse:collapse;font-size:.72rem;white-space:nowrap">';
+
+  // Header row
+  html+='<thead><tr style="background:#0a1520">'+
+    '<th style="text-align:left;padding:5px 10px;color:#607080;font-size:.65rem;min-width:160px;border-bottom:2px solid #2d4060">PERIOD / YEAR</th>'+
+    '<th style="padding:5px 8px;color:#607080;font-size:.65rem;border-bottom:2px solid #2d4060">Date</th>'+
+    VARS.map(function(v){{return '<th style="padding:5px 8px;color:'+VC[v]+';font-size:.68rem;text-align:center;border-bottom:2px solid #2d4060'+(v===vn?';font-weight:700':'')+'">'+v+'</th>';}}).join("")+
+    '</tr></thead><tbody>';
+
+  // Helper: format a value cell
+  function fmtCell(val, currVal, bold, color){{
+    var style='padding:4px 8px;text-align:center;';
+    if(bold)style+='font-weight:700;';
+    if(color)style+='color:'+color+';';
+    if(val==null)return '<td style="'+style+'color:#3a4a5a">—</td>';
+    var diff=(currVal!=null&&val!=currVal)?
+      ' <span style="font-size:.58rem;color:'+(val-currVal>=0?'#fc8181':'#68d391')+'">('+
+      (val-currVal>=0?'+':'')+((val-currVal)).toFixed(1)+')</span>':'';
+    return '<td style="'+style+'">'+val.toFixed(1)+'%'+diff+'</td>';
+  }}
+
+  // Get current (latest) week values for diff calc
+  var cwRow=rows6.length?rows6[rows6.length-1]:null;
+  var cwVals={{}};
+  VARS.forEach(function(v){{cwVals[v]=cwRow?cwRow[v]:null;}});
+
+  // ── Section A: Last 6 current-year weeks (most recent first) ──
+  var rows6rev=rows6.slice().reverse();
+  rows6rev.forEach(function(r,i){{
+    var isCurr=(r.iso_week===latestIW);
+    html+='<tr style="'+(isCurr?'background:#0a1f14':i%2===0?'background:#0d1117':'background:#0e1420')+'">'+
+      '<td style="padding:4px 10px;color:'+(isCurr?'#68d391':'#90a4ae')+';font-weight:'+(isCurr?'700':'400')+'">'+(isCurr?'★ ':'')+currYr+' — '+(r.label||'Wk'+r.iso_week)+'</td>'+
+      '<td style="padding:4px 8px;color:#607080;font-size:.64rem">'+(r.date||'')+'</td>'+
+      VARS.map(function(v){{
+        var val=r[v];
+        // No diff on current-year rows
+        var style='padding:4px 8px;text-align:center;'+(isCurr?'font-weight:700;color:'+(v===vn?'#f6e05e':'#68d391'):v===vn?'color:#c0d890':'');
+        return '<td style="'+style+'">'+(val!=null?val.toFixed(1)+'%':'—')+'</td>';
+      }}).join("")+
       '</tr>';
   }});
-  c.innerHTML='<table><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table>';
+
+  // Divider
+  html+='<tr><td colspan="'+(2+VARS.length)+'" style="background:#1a2535;height:2px;padding:0"></td></tr>';
+
+  // ── Section B: Last year same week ──
+  if(lyComp){{
+    html+='<tr style="background:#1a1208">'+
+      '<td style="padding:4px 10px;color:#f6e05e;font-weight:600">⬅ '+lyComp.year+' (same week)</td>'+
+      '<td style="padding:4px 8px;color:#607080;font-size:.64rem">Wk '+lyComp.iso_week+'</td>'+
+      VARS.map(function(v){{return fmtCell(lyComp[v],cwVals[v],false,'#f6e05e');}}).join("")+
+      '</tr>';
+  }}
+
+  // Divider
+  html+='<tr><td colspan="'+(2+VARS.length)+'" style="background:#1a2535;height:2px;padding:0"></td></tr>';
+
+  // ── Section C: 5 analog years same week ──
+  analogComps.forEach(function(comp,ai){{
+    var col=ACOLS[ai%5];
+    html+='<tr style="'+(ai%2===0?'background:#0d1117':'background:#0e1420')+'">'+
+      '<td style="padding:4px 10px;color:'+col+'">≈ '+comp.year+' analog'+(comp.rmse!=null?' (RMSE='+comp.rmse+')':'')+'</td>'+
+      '<td style="padding:4px 8px;color:#607080;font-size:.64rem">Wk '+comp.iso_week+'</td>'+
+      VARS.map(function(v){{return fmtCell(comp[v],cwVals[v],false,col);}}).join("")+
+      '</tr>';
+  }});
+
+  html+='</tbody></table></div>';
+  c.innerHTML=html;
 }}
 
 function drawOneLineGeneric(cid,vn,slData,analogsData){{
@@ -1215,64 +1235,226 @@ function drawOneLineGeneric(cid,vn,slData,analogsData){{
   var d=slData.variables[vn];if(!d)return;
   var weeks=slData.iso_weeks,wl=slData.weeks,cYr=slData.curr_yr;
   var analogs=analogsData[vn]||[],ser=d.series,aYrs=d.all_hist_years;
-  var cw=c.clientWidth||340,ML=36,MR=60,MT=14,MB=44,svgH=185,pw=cw-ML-MR,ph=svgH-MT-MB;
-  var allV=[];Object.keys(ser).forEach(function(y){{(ser[y]||[]).forEach(function(v){{if(v!==null)allV.push(v);}});}});
-  var yMax=allV.length?Math.min(100,Math.max.apply(null,allV)):100;
-  var xS=sc(0,weeks.length-1,0,pw),yS=sc(0,yMax,ph,0);
-  var svg=msvg(cw,svgH),g=mel("g",{{transform:"translate("+ML+","+MT+")"}});
-  [0,25,50,75,100].filter(function(t){{return t<=yMax+1;}}).forEach(function(t){{
-    var yy=yS(t);
-    g.appendChild(mel("line",{{x1:0,y1:yy,x2:pw,y2:yy,stroke:"#1a2535","stroke-width":"1"}}));
-    g.appendChild(mtx(t+"%",{{x:-4,y:yy+3,"text-anchor":"end","font-size":"7"}},"#607080"));
-  }});
-  wl.forEach(function(lbl,i){{
-    if(i%4===0){{
-      var xx=xS(i);
-      var tx=mel("text",{{x:xx,y:ph+12,"text-anchor":"middle",transform:"rotate(-35,"+xx+","+(ph+12)+")","font-size":"7","fill":"#607080"}});
-      tx.textContent=lbl;g.appendChild(tx);
-    }}
-  }});
-  function mkLine(yr,col,sw,op,dash){{
-    var line=ser[String(yr)];if(!line)return;
-    var pts=[];line.forEach(function(v,i){{if(v!==null)pts.push([xS(i),yS(v)]);}});
-    if(pts.length<2)return;
-    var pd="M"+pts[0][0].toFixed(1)+","+pts[0][1].toFixed(1);
-    for(var i=1;i<pts.length;i++)pd+="L"+pts[i][0].toFixed(1)+","+pts[i][1].toFixed(1);
-    var a={{d:pd,stroke:col,"stroke-width":String(sw),fill:"none",opacity:String(op)}};
-    if(dash)a["stroke-dasharray"]=dash;
-    tt(g.appendChild(mel("path",a)),String(yr));
+
+  // ── Year toggle bar ──
+  var barDiv=document.createElement("div");
+  barDiv.style.cssText="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:6px;font-size:.62rem;align-items:center;";
+  barDiv.innerHTML='<span style="color:#607080;margin-right:3px">'+vn+'</span>';
+
+  var last5=slData.last5_yrs||[];
+
+  // Active by default: current year + analogs + last 5 years
+  var activeYrs={{}};
+  activeYrs[String(cYr)]=true;
+  analogs.forEach(function(yr){{activeYrs[String(yr)]=true;}});
+  last5.forEach(function(yr){{activeYrs[String(yr)]=true;}});
+
+
+  // Add top years as colored badges: current + analogs + last5
+  var shownInBar={{}};
+  function addBadge(yr,col,suffix){{
+    if(shownInBar[String(yr)])return;
+    shownInBar[String(yr)]=true;
+    if(!ser[String(yr)])return;
+    var btn=document.createElement("span");
+    btn.textContent=yr+(suffix||"");
+    btn.style.cssText="cursor:pointer;padding:1px 6px;border-radius:3px;border:1px solid "+col+
+      ";color:"+col+";background:"+(activeYrs[String(yr)]?"#1a2535":"#0d1117")+";white-space:nowrap";
+    btn.dataset.yr=String(yr);
+    btn.onclick=function(){{
+      var y=this.dataset.yr;
+      activeYrs[y]=!activeYrs[y];
+      this.style.background=activeYrs[y]?"#1a2535":"#0d1117";
+      drawChart();
+    }};
+    barDiv.appendChild(btn);
   }}
-  aYrs.forEach(function(yr){{if(analogs.indexOf(yr)<0&&yr!==cYr)mkLine(yr,"#2a3848",0.7,0.5,null);}});
-  analogs.forEach(function(yr,i){{
-    var col=ACOLS[i%5];mkLine(yr,col,1.8,0.88,"5,3");
-    var line=ser[String(yr)];if(!line)return;
-    var lv=null,li=-1;line.forEach(function(v,j){{if(v!==null){{lv=v;li=j;}}}});
-    if(lv!==null){{
-      g.appendChild(mel("circle",{{cx:xS(li),cy:yS(lv),r:"3",fill:col}}));
-      g.appendChild(mtx(String(yr)+": "+lv.toFixed(0)+"%",{{x:xS(li)+5,y:yS(lv)+3,"font-size":"7.5","font-weight":"600"}},col));
-    }}
+  addBadge(cYr, VC[vn]||"#68d391","★");
+  analogs.forEach(function(yr,i){{addBadge(yr,ACOLS[i%5],"");}});
+  // Last 5 years — use distinct greys/whites if not already shown as analog
+  var last5Cols=["#e2e8f0","#b0c0d0","#90a0b0","#708090","#506070"];
+  last5.forEach(function(yr,i){{
+    var col=shownInBar[String(yr)]?null:last5Cols[i%5];
+    if(col)addBadge(yr,col,"");
   }});
-  mkLine(cYr,VC[vn]||"#68d391",2.5,1,null);
-  var cl2=ser[String(cYr)];
-  if(cl2){{
-    var lv=null,li=-1;cl2.forEach(function(v,j){{if(v!==null){{lv=v;li=j;}}}});
-    if(lv!==null){{
-      g.appendChild(mel("circle",{{cx:xS(li),cy:yS(lv),r:"4",fill:VC[vn]||"#68d391"}}));
-      g.appendChild(mtx(cYr+": "+lv.toFixed(1)+"%",{{x:xS(li)+5,y:yS(lv)-5,"font-size":"8","font-weight":"700"}},VC[vn]||"#68d391"));
+
+  // Add "Historical" toggle
+  var histActive=true;
+  var histBtn=document.createElement("span");
+  histBtn.textContent="Historical";
+  histBtn.style.cssText="cursor:pointer;padding:1px 6px;border-radius:3px;border:1px solid #2a3848;color:#607080;background:#1a2535;white-space:nowrap";
+  histBtn.onclick=function(){{histActive=!histActive;this.style.background=histActive?"#1a2535":"#0d1117";drawChart();}};
+  barDiv.appendChild(histBtn);
+  c.appendChild(barDiv);
+
+  // ── Chart container ──
+  var chartDiv=document.createElement("div");
+  chartDiv.style.cssText="position:relative";
+  c.appendChild(chartDiv);
+
+  // ── Tooltip ──
+  var tip=document.createElement("div");
+  tip.style.cssText="position:absolute;background:#0e1d2e;border:1px solid #2d4060;border-radius:5px;padding:5px 9px;font-size:.68rem;color:#e2e8f0;pointer-events:none;display:none;z-index:10;white-space:nowrap";
+  chartDiv.appendChild(tip);
+
+  function drawChart(){{
+    // Clear previous SVG
+    var oldSvg=chartDiv.querySelector("svg");if(oldSvg)chartDiv.removeChild(oldSvg);
+
+    var cw=chartDiv.clientWidth||c.clientWidth||340;
+    var ML=36,MR=12,MT=10,MB=44,svgH=200,pw=cw-ML-MR,ph=svgH-MT-MB;
+
+    // Compute y range from ALL series (for shaded band)
+    var allV=[];
+    Object.keys(ser).forEach(function(y){{(ser[y]||[]).forEach(function(v){{if(v!==null)allV.push(v);}});}});
+    var yMax=allV.length?Math.min(100,Math.max.apply(null,allV)+2):100;
+    var yMin=0;
+
+    var xS=sc(0,Math.max(weeks.length-1,1),0,pw);
+    var yS=sc(yMin,yMax,ph,0);
+    var svg=msvg(cw,svgH);
+    var g=mel("g",{{transform:"translate("+ML+","+MT+")"}});
+
+    // ── Shaded historical min/max band ──
+    var bandMx=[],bandMn=[];
+    weeks.forEach(function(_,i){{
+      var vals=[];
+      aYrs.forEach(function(yr){{
+        if(String(yr)===String(cYr))return;
+        var line=ser[String(yr)];
+        if(line&&line[i]!=null)vals.push(line[i]);
+      }});
+      bandMx.push(vals.length?Math.max.apply(null,vals):null);
+      bandMn.push(vals.length?Math.min.apply(null,vals):null);
+    }});
+
+    // Build band polygon
+    var topPts=[],botPts=[];
+    weeks.forEach(function(_,i){{
+      if(bandMx[i]!=null)topPts.push([xS(i),yS(bandMx[i])]);
+    }});
+    weeks.forEach(function(_,i){{
+      var ri=weeks.length-1-i;
+      if(bandMn[ri]!=null)botPts.push([xS(ri),yS(bandMn[ri])]);
+    }});
+    if(topPts.length>1&&botPts.length>1){{
+      var pts=topPts.concat(botPts);
+      var pd="M"+pts[0][0].toFixed(1)+","+pts[0][1].toFixed(1)+
+        pts.slice(1).map(function(p){{return "L"+p[0].toFixed(1)+","+p[1].toFixed(1);}}).join("")+"Z";
+      g.appendChild(mel("path",{{d:pd,fill:VBG[vn]||"#0a1f14",opacity:"0.85",stroke:"none"}}));
     }}
+
+    // ── Grid lines & axes ──
+    [0,25,50,75,100].filter(function(t){{return t>=yMin&&t<=yMax+1;}}).forEach(function(t){{
+      var yy=yS(t);
+      g.appendChild(mel("line",{{x1:0,y1:yy,x2:pw,y2:yy,stroke:"#1a2535","stroke-width":"1"}}));
+      g.appendChild(mtx(t+"%",{{x:-4,y:yy+3,"text-anchor":"end","font-size":"7"}},"#607080"));
+    }});
+    // ── X-axis: month labels at first week of each month ──
+    // wl entries look like "Jan W1", "Feb W1" etc — find first occurrence of each month
+    var drawnMonths={{}};
+    wl.forEach(function(lbl,i){{
+      var mon=lbl.split(" ")[0]; // "Jan","Feb"…
+      if(!drawnMonths[mon]){{
+        drawnMonths[mon]=true;
+        var xx=xS(i);
+        g.appendChild(mel("line",{{x1:xx,y1:0,x2:xx,y2:ph,stroke:"#1e2a3a","stroke-width":"0.5"}}));
+        var tx=mel("text",{{x:xx,y:ph+11,"text-anchor":"middle","font-size":"7.5","fill":"#7090a0"}});
+        tx.textContent=mon;g.appendChild(tx);
+      }}
+    }});
+
+    // ── Historical lines (dim) — show all when histActive, else skip unnamed ──
+    if(histActive){{
+      aYrs.forEach(function(yr){{
+        if(analogs.indexOf(yr)>=0||yr===cYr||last5.indexOf(yr)>=0)return; // drawn separately
+        var line=ser[String(yr)];if(!line)return;
+        var pts2=[];line.forEach(function(v,i){{if(v!==null)pts2.push([xS(i),yS(v)]);}});
+        if(pts2.length<2)return;
+        var pd2="M"+pts2[0][0].toFixed(1)+","+pts2[0][1].toFixed(1);
+        for(var i=1;i<pts2.length;i++)pd2+="L"+pts2[i][0].toFixed(1)+","+pts2[i][1].toFixed(1);
+        g.appendChild(mel("path",{{d:pd2,stroke:"#2d3e50","stroke-width":"0.6",fill:"none",opacity:"0.5"}}));
+      }});
+    }}
+
+    // Helper: draw one named line
+    function mkLine2(yr,col,sw,dash,addDot){{
+      if(!activeYrs[String(yr)])return;
+      var line=ser[String(yr)];if(!line)return;
+      var pts2=[];line.forEach(function(v,i){{if(v!==null)pts2.push([xS(i),yS(v),i,v]);}});
+      if(pts2.length<2)return;
+      var pd2="M"+pts2[0][0].toFixed(1)+","+pts2[0][1].toFixed(1);
+      for(var i=1;i<pts2.length;i++)pd2+="L"+pts2[i][0].toFixed(1)+","+pts2[i][1].toFixed(1);
+      var a={{d:pd2,stroke:col,"stroke-width":String(sw),fill:"none",opacity:"0.95"}};
+      if(dash)a["stroke-dasharray"]=dash;
+      g.appendChild(mel("path",a));
+      if(addDot){{
+        var lp=pts2[pts2.length-1];
+        g.appendChild(mel("circle",{{cx:lp[0].toFixed(1),cy:lp[1].toFixed(1),r:"3.5",fill:col,stroke:"#0d1117","stroke-width":"1"}}));
+        // Annual avg label
+        var vals2=line.filter(function(v){{return v!=null;}});
+        var avg2=vals2.length?vals2.reduce(function(a,b){{return a+b;}},0)/vals2.length:null;
+        if(avg2!=null){{
+          var lx=lp[0]+6,ly=lp[1];
+          if(lx>pw-20)lx=lp[0]-40;
+          g.appendChild(mtx(yr+": "+avg2.toFixed(1)+"%",{{x:lx,y:ly,"font-size":"7.5","font-weight":"600"}},col));
+        }}
+      }}
+    }}
+
+    // ── Last 5 years lines (if active and not already an analog) ──
+    var last5Cols=["#e2e8f0","#b0c0d0","#90a0b0","#708090","#506070"];
+    last5.forEach(function(yr,i){{
+      if(analogs.indexOf(yr)>=0)return; // already drawn as analog
+      mkLine2(yr,last5Cols[i%5],1.2,"4,2",true);
+    }});
+
+    // ── Analog lines (dashed, distinct colors) ──
+    analogs.forEach(function(yr,i){{mkLine2(yr,ACOLS[i%5],1.6,"5,3",true);}});
+
+    // ── Current year line (bold solid) ──
+    mkLine2(cYr,VC[vn]||"#68d391",2.8,null,true);
+
+    // ── Latest data vertical dotted line ──
+    var latIdx=weeks.indexOf(slData.latest_iw);
+    if(latIdx>=0){{var xx=xS(latIdx);g.appendChild(mel("line",{{x1:xx,y1:0,x2:xx,y2:ph,stroke:"#607080","stroke-width":"1","stroke-dasharray":"3,3"}}));}}
+
+    svg.appendChild(g);
+    chartDiv.insertBefore(svg,tip);
+
+    // ── Mouse tooltip overlay ──
+    var overlay=mel("rect",{{x:String(ML),y:String(MT),width:String(pw),height:String(ph),fill:"transparent",style:"cursor:crosshair"}});
+    svg.appendChild(overlay);
+    overlay.addEventListener("mousemove",function(evt){{
+      var rect=svg.getBoundingClientRect();
+      var mx=evt.clientX-rect.left-ML;
+      var idx=Math.round(mx/pw*(weeks.length-1));
+      idx=Math.max(0,Math.min(weeks.length-1,idx));
+      var tipLines=['<b style="color:#90a4ae">'+wl[idx]+'</b>'];
+      // Current year
+      var cl=ser[String(cYr)];
+      if(cl&&cl[idx]!=null)tipLines.push('<span style="color:'+VC[vn]+'">'+(VC[vn]?cYr:cYr)+': '+cl[idx].toFixed(1)+'%</span>');
+      // Analogs
+      analogs.forEach(function(yr,i){{
+        var al=ser[String(yr)];
+        if(al&&al[idx]!=null){{
+          var cv=cl&&cl[idx]!=null?cl[idx]:null;
+          var diff=cv!=null?(' ('+(al[idx]-cv>=0?'+':'')+((al[idx]-cv)).toFixed(1)+'pp)'):'';
+          tipLines.push('<span style="color:'+ACOLS[i%5]+'">'+yr+': '+al[idx].toFixed(1)+'%'+diff+'</span>');
+        }}
+      }});
+      tip.innerHTML=tipLines.join('<br>');
+      var tx=evt.clientX-rect.left+10;
+      if(tx+140>cw)tx=evt.clientX-rect.left-150;
+      tip.style.left=tx+'px';tip.style.top=(MT+4)+'px';tip.style.display='block';
+    }});
+    overlay.addEventListener("mouseleave",function(){{tip.style.display='none';}});
   }}
-  var latIdx=weeks.indexOf(slData.latest_iw);
-  if(latIdx>=0){{var xx=xS(latIdx);g.appendChild(mel("line",{{x1:xx,y1:0,x2:xx,y2:ph,stroke:"#607080","stroke-width":"1","stroke-dasharray":"3,3"}}));}}
-  svg.appendChild(g);c.appendChild(svg);
-  var leg=document.createElement("div");leg.style.cssText="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px;font-size:.65rem";
-  var items=[[String(cYr),VC[vn]||"#68d391","700","solid"]];
-  analogs.forEach(function(yr,i){{items.push([String(yr),ACOLS[i%5],"600","dashed"]);}});
-  items.push(["Historical","#2a3848","400","solid"]);
-  items.forEach(function(item){{
-    var ls=item[3]==="dashed"?"border-top:2px dashed "+item[1]:"border-top:2px solid "+item[1];
-    leg.innerHTML+='<span style="display:flex;align-items:center;gap:2px"><span style="width:14px;'+ls+';display:inline-block"></span><span style="color:'+item[1]+';font-weight:'+item[2]+'">'+item[0]+'</span></span>';
-  }});
-  c.appendChild(leg);
+
+  drawChart();
+  // Redraw on resize
+  var ro=new ResizeObserver(function(){{drawChart();}});
+  ro.observe(c);
 }}
 
 function drawSeasonCharts(){{
@@ -1418,55 +1600,134 @@ function initBanner(){{
   }}else{{b.innerHTML='⚠ No prediction available yet. Add drought data for current season.';}}
 }}
 
+// 13-row × 13-col definitions
+var MAT_ROW_DEFS=[
+  {{p:1, stat:"ab",    label:"1yr Avg Ab"}},
+  {{p:5, stat:"ab",    label:"5yr Avg Ab"}},
+  {{p:5, stat:"ab_min",label:"5yr Min Ab"}},
+  {{p:5, stat:"ab_max",label:"5yr Max Ab"}},
+  {{p:10,stat:"ab",    label:"10yr Avg Ab"}},
+  {{p:10,stat:"ab_min",label:"10yr Min Ab"}},
+  {{p:10,stat:"ab_max",label:"10yr Max Ab"}},
+  {{p:15,stat:"ab",    label:"15yr Avg Ab"}},
+  {{p:15,stat:"ab_min",label:"15yr Min Ab"}},
+  {{p:15,stat:"ab_max",label:"15yr Max Ab"}},
+  {{p:20,stat:"ab",    label:"20yr Avg Ab"}},
+  {{p:20,stat:"ab_min",label:"20yr Min Ab"}},
+  {{p:20,stat:"ab_max",label:"20yr Max Ab"}},
+];
+var MAT_COL_DEFS=[
+  {{p:1, stat:"yld",    label:"1yr Avg Yld"}},
+  {{p:5, stat:"yld",    label:"5yr Avg Yld"}},
+  {{p:5, stat:"yld_min",label:"5yr Min Yld"}},
+  {{p:5, stat:"yld_max",label:"5yr Max Yld"}},
+  {{p:10,stat:"yld",    label:"10yr Avg Yld"}},
+  {{p:10,stat:"yld_min",label:"10yr Min Yld"}},
+  {{p:10,stat:"yld_max",label:"10yr Max Yld"}},
+  {{p:15,stat:"yld",    label:"15yr Avg Yld"}},
+  {{p:15,stat:"yld_min",label:"15yr Min Yld"}},
+  {{p:15,stat:"yld_max",label:"15yr Max Yld"}},
+  {{p:20,stat:"yld",    label:"20yr Avg Yld"}},
+  {{p:20,stat:"yld_min",label:"20yr Min Yld"}},
+  {{p:20,stat:"yld_max",label:"20yr Max Yld"}},
+];
+
+function getStatFromPeriod(sd, p, stat){{
+  if(p===1){{
+    // 1yr = last_yr_actual
+    var ly=sd.last_yr_actual;
+    if(!ly)return null;
+    if(stat==="ab"||stat==="ab_min"||stat==="ab_max") return ly.ab;
+    if(stat==="yld"||stat==="yld_min"||stat==="yld_max") return ly.yld;
+    return null;
+  }}
+  var per=sd.periods&&sd.periods[p];
+  if(!per)return null;
+  return per[stat]!=null?per[stat]:null;
+}}
+
+function computeMatCell(rowDef, colDef, useTxModel){{
+  var states=PROD.state_data;
+  var keys=Object.keys(states).filter(function(s){{return s!=="US";}});
+  var total=0; var ok=true;
+  keys.forEach(function(st){{
+    if(!ok)return;
+    var sd=states[st];
+    var ab, yld, plt;
+    // abandonment
+    if(st==="TX"&&useTxModel&&BTX&&BTX.point!=null){{
+      ab=BTX.point;
+    }}else{{
+      ab=getStatFromPeriod(sd,rowDef.p,rowDef.stat);
+    }}
+    yld=getStatFromPeriod(sd,colDef.p,colDef.stat);
+    plt=getPlanted(st);
+    if(ab==null||yld==null||plt==null){{ok=false;return;}}
+    total+=plt*1000*(1-ab)*yld/480000000;
+  }});
+  return ok?Math.round(total*1000)/1000:null;
+}}
+
 function buildMatAB(){{
   var ca=document.getElementById("mA"),cb=document.getElementById("mB");
   if(!ca||!cb)return;
-  var PL=PROD.period_labels;
-  var periods=[1,5,10,15,20];
-  function computeCell(pAb, pYld, useTxModel){{
-    var total=0; var ok=true;
-    var states=PROD.state_data;
-    var keys=Object.keys(states).filter(function(s){{return s!=="US"&&s!==PROD.us_geo;}});
-    keys.forEach(function(st){{
-      var sd=states[st]; if(!ok)return;
-      var pa=pAb===1?(sd.last_yr_actual?{{ab:sd.last_yr_actual.ab}}:null):sd.periods&&sd.periods[pAb];
-      var py=pYld===1?(sd.last_yr_actual?{{yld:sd.last_yr_actual.yld}}:null):sd.periods&&sd.periods[pYld];
-      if(!pa||!py){{ok=false;return;}}
-      var ab=(st==="TX"&&useTxModel&&BTX.point!=null)?BTX.point:pa.ab;
-      var yld=py.yld;
-      var plt=getPlanted(st);
-      if(ab==null||yld==null||plt==null){{ok=false;return;}}
-      total+=plt*1000*(1-ab)*yld/480000000;
+
+  function matHdr(){{
+    var topCells='<th rowspan="2" style="min-width:100px;background:#0e1d2e;position:sticky;left:0;top:0;z-index:6;text-align:left;padding:5px 8px;vertical-align:bottom">Ab Scenario↓ \\ Yield→</th>';
+    topCells+='<th colspan="1" style="background:#0e1d2e;color:#7fb3d3;border-bottom:1px solid #2d4060;position:sticky;top:0;z-index:4">1yr</th>';
+    [5,10,15,20].forEach(function(p){{
+      topCells+='<th colspan="3" style="background:#0e1d2e;color:#7fb3d3;border-bottom:1px solid #2d4060;position:sticky;top:0;z-index:4">'+p+'yr</th>';
     }});
-    return ok?Math.round(total*1000)/1000:null;
+    var ROW1_H=28; // px — matches typical th padding+font
+    var subCells=MAT_COL_DEFS.map(function(cd){{
+      var lbl=cd.stat==="yld"?"Avg":(cd.stat==="yld_min"?"Min":"Max");
+      return '<th style="background:#0a1520;color:#607080;font-size:.62rem;font-weight:400;position:sticky;top:'+ROW1_H+'px;z-index:4;padding:3px 6px">'+lbl+'</th>';
+    }}).join("");
+    return '<tr>'+topCells+'</tr><tr>'+subCells+'</tr>';
   }}
-  function hdr(){{
-    return '<tr><th class="lft" style="min-width:60px;background:#0e1d2e">Ab↓ Yld→</th>'+
-      periods.map(function(p){{return '<th style="background:#0e1d2e;color:#7fb3d3">'+PL[p]+'</th>';}}).join("")+'</tr>';
-  }}
-  function buildRows(useTxModel){{
-    return periods.map(function(pAb){{
-      var cells=periods.map(function(pYld){{
-        var v=computeCell(pAb,pYld,useTxModel);
-        return '<td>'+(v!=null?v.toFixed(2):"—")+'</td>';
+
+  function matRows(useTxModel){{
+    var prevP=null;
+    return MAT_ROW_DEFS.map(function(rd){{
+      var isNewPeriod=(rd.p!==prevP);
+      prevP=rd.p;
+      var rowLbl=rd.stat==="ab"?"Avg":(rd.stat==="ab_min"?"Min":"Max");
+      var periodLbl=rd.p===1?"1yr ":(isNewPeriod?rd.p+"yr ":"");
+      var cells=MAT_COL_DEFS.map(function(cd){{
+        var v=computeMatCell(rd,cd,useTxModel);
+        var isAvgAvg=(rd.stat==="ab"&&cd.stat==="yld");
+        return '<td style="'+(isAvgAvg?"font-weight:600;color:#e2e8f0":"color:#b0c8c0")+'">'+(v!=null?v.toFixed(2):"—")+'</td>';
       }}).join("");
-      return '<tr><th class="lft" style="background:#111820;color:#90a4ae">'+PL[pAb]+'</th>'+cells+'</tr>';
+      var borderTop=isNewPeriod?"border-top:2px solid #2d4060":"";
+      return '<tr style="'+borderTop+'">'+
+        '<th class="lft" style="background:#111820;color:#90a4ae;font-size:.68rem;position:sticky;left:0">'+
+        '<span style="color:#7fb3d3;font-size:.6rem">'+periodLbl+'</span>'+rowLbl+'</th>'+cells+'</tr>';
     }}).join("");
   }}
-  ca.innerHTML='<table class="mtbl"><thead>'+hdr()+'</thead><tbody>'+buildRows(false)+'</tbody></table>';
-  var bRows=periods.map(function(pAb){{
-    var cells=periods.map(function(pYld){{
-      var vB=computeCell(pAb,pYld,true);
-      var vA=computeCell(pAb,pYld,false);
+
+  ca.innerHTML='<div style="overflow:auto;max-height:520px"><table class="mtbl" style="border-collapse:collapse"><thead>'+matHdr()+'</thead><tbody>'+matRows(false)+'</tbody></table></div>';
+
+  // Matrix B: same but with delta vs A
+  var bBody=MAT_ROW_DEFS.map(function(rd,ri){{
+    var isNewPeriod=(ri===0||MAT_ROW_DEFS[ri-1].p!==rd.p);
+    var rowLbl=rd.stat==="ab"?"Avg":(rd.stat==="ab_min"?"Min":"Max");
+    var periodLbl=rd.p===1?"1yr ":(isNewPeriod?rd.p+"yr ":"");
+    var cells=MAT_COL_DEFS.map(function(cd){{
+      var vB=computeMatCell(rd,cd,true);
+      var vA=computeMatCell(rd,cd,false);
       var delta=(vB!=null&&vA!=null)?vB-vA:null;
-      var dStr=delta!=null?' <span style="font-size:.6rem;color:'+(delta>=0?"#fc8181":"#68d391")+'">'+(delta>=0?"+":"")+delta.toFixed(2)+'</span>':'';
-      return '<td style="'+(delta!=null&&Math.abs(delta)>0.001?"background:#0a1520":"")+'">'+
+      var dStr=delta!=null?' <span style="font-size:.59rem;color:'+(delta>=0?"#fc8181":"#68d391")+'">'+(delta>=0?"+":"")+delta.toFixed(2)+'</span>':'';
+      var isAvgAvg=(rd.stat==="ab"&&cd.stat==="yld");
+      return '<td style="'+(delta!=null&&Math.abs(delta)>0.001?"background:#0a1520":"")+(isAvgAvg?";font-weight:600":"")+'">'+
         (vB!=null?vB.toFixed(2):"—")+dStr+'</td>';
     }}).join("");
-    return '<tr><th class="lft" style="background:#111820;color:#90a4ae">'+PL[pAb]+'</th>'+cells+'</tr>';
+    var borderTop=isNewPeriod?"border-top:2px solid #2d4060":"";
+    return '<tr style="'+borderTop+'">'+
+      '<th class="lft" style="background:#111820;color:#90a4ae;font-size:.68rem;position:sticky;left:0">'+
+      '<span style="color:#7fb3d3;font-size:.6rem">'+periodLbl+'</span>'+rowLbl+'</th>'+cells+'</tr>';
   }}).join("");
-  cb.innerHTML='<table class="mtbl"><thead>'+hdr()+'</thead><tbody>'+bRows+'</tbody></table>';
-  document.getElementById("mB-sub").textContent='TX abandonment fixed at '+(BTX.point*100).toFixed(1)+'% (model). Δ vs Matrix A shown in red/green.';
+  cb.innerHTML='<div style="overflow:auto;max-height:520px"><table class="mtbl" style="border-collapse:collapse"><thead>'+matHdr()+'</thead><tbody>'+bBody+'</tbody></table></div>';
+  document.getElementById("mB-sub").textContent='TX abandonment fixed at '+(BTX&&BTX.point!=null?(BTX.point*100).toFixed(1):'N/A')+'% (model). Δ vs Matrix A shown in red/green.';
 }}
 
 function buildGridC(txPlt,modelAb){{
@@ -1476,8 +1737,9 @@ function buildGridC(txPlt,modelAb){{
   if(!abR||!abR.length){{c.innerHTML='<div style="color:#607080;padding:8px;font-size:.7rem">No TX data available.</div>';return;}}
   var mRow=null;
   if(modelAb!=null){{var diffs=abR.map(function(a){{return Math.abs(a-modelAb);}});mRow=diffs.indexOf(Math.min.apply(null,diffs));}}
-  var hdr='<tr><th style="text-align:left;background:#0e1d2e;min-width:55px;position:sticky;left:0">Ab%↓ Yld→</th>'+
-    yldR.map(function(y){{return '<th style="background:#0e1d2e;color:#7fb3d3">'+y+'</th>';}}).join("")+'</tr>';
+  var hdr='<tr style="position:sticky;top:0;z-index:4">'+
+    '<th style="text-align:left;background:#0e1d2e;min-width:60px;position:sticky;left:0;z-index:5;top:0">Ab%↓ Yld→</th>'+
+    yldR.map(function(y){{return '<th style="background:#0e1d2e;color:#7fb3d3;position:sticky;top:0">'+y+'</th>';}}).join("")+'</tr>';
   var body=abR.map(function(ab,ri){{
     var isMod=ri===mRow;
     var cells=yldR.map(function(yld){{
@@ -1485,11 +1747,11 @@ function buildGridC(txPlt,modelAb){{
       return '<td style="'+(isMod?"color:#68d391;font-weight:600":"")+'">'+prod.toFixed(2)+'</td>';
     }}).join("");
     return '<tr style="'+(isMod?"background:#0a1f14":"")+'">'+
-      '<th style="background:'+(isMod?"#061410":"#111820")+';color:'+(isMod?"#68d391":"#90a4ae")+';position:sticky;left:0;text-align:left">'+
+      '<th style="background:'+(isMod?"#061410":"#111820")+';color:'+(isMod?"#68d391":"#90a4ae")+';position:sticky;left:0;text-align:left;z-index:2">'+
       (ab*100).toFixed(0)+"%"+(isMod?" ★":"")+'</th>'+cells+'</tr>';
   }}).join("");
-  c.innerHTML='<div style="font-size:.65rem;color:#607080;margin-bottom:4px">TX planted: '+Math.round(txPlt).toLocaleString()+'K ac · mn 480-lb bales'+(modelAb!=null?" · ★=model row":"")+
-    '</div><div style="overflow-x:auto"><table class="mtbl"><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table></div>';
+  c.innerHTML='<div style="font-size:.65rem;color:#607080;margin-bottom:6px">TX planted: '+Math.round(txPlt).toLocaleString()+'K ac · mn 480-lb bales'+(modelAb!=null?" · ★=model row":"")+
+    '</div><div style="overflow-x:auto;max-height:480px;overflow-y:auto"><table class="mtbl" style="border-collapse:collapse"><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table></div>';
 }}
 
 function buildGridD(modelAb){{
@@ -1506,8 +1768,9 @@ function buildGridD(modelAb){{
   }}
   var mRow=null;
   if(modelAb!=null){{var diffs=usAb.map(function(a){{return Math.abs(a-modelAb);}});mRow=diffs.indexOf(Math.min.apply(null,diffs));}}
-  var hdr='<tr><th style="text-align:left;background:#0e1d2e;min-width:55px;position:sticky;left:0">Ab%↓ Yld→</th>'+
-    usYld.map(function(y){{return '<th style="background:#0e1d2e;color:#7fb3d3">'+y+'</th>';}}).join("")+'</tr>';
+  var hdr='<tr style="position:sticky;top:0;z-index:4">'+
+    '<th style="text-align:left;background:#0e1d2e;min-width:60px;position:sticky;left:0;z-index:5;top:0">Ab%↓ Yld→</th>'+
+    usYld.map(function(y){{return '<th style="background:#0e1d2e;color:#7fb3d3;position:sticky;top:0">'+y+'</th>';}}).join("")+'</tr>';
   var body=usAb.map(function(ab,ri){{
     var isMod=ri===mRow;
     var cells=usYld.map(function(yld){{
@@ -1515,11 +1778,11 @@ function buildGridD(modelAb){{
       return '<td style="'+(isMod?"color:#68d391;font-weight:600":"")+'">'+prod.toFixed(2)+'</td>';
     }}).join("");
     return '<tr style="'+(isMod?"background:#0a1f14":"")+'">'+
-      '<th style="background:'+(isMod?"#061410":"#111820")+';color:'+(isMod?"#68d391":"#90a4ae")+';position:sticky;left:0;text-align:left">'+
+      '<th style="background:'+(isMod?"#061410":"#111820")+';color:'+(isMod?"#68d391":"#90a4ae")+';position:sticky;left:0;text-align:left;z-index:2">'+
       (ab*100).toFixed(2)+"%"+(isMod?" ★":"")+'</th>'+cells+'</tr>';
   }}).join("");
-  c.innerHTML='<div style="font-size:.65rem;color:#607080;margin-bottom:4px">US planted: '+Math.round(usPlt).toLocaleString()+'K ac · Derived US ab from TX model · mn 480-lb bales</div>'+
-    '<div style="overflow-x:auto"><table class="mtbl"><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table></div>';
+  c.innerHTML='<div style="font-size:.65rem;color:#607080;margin-bottom:6px">US planted: '+Math.round(usPlt).toLocaleString()+'K ac · Derived US ab from TX model · mn 480-lb bales</div>'+
+    '<div style="overflow-x:auto;max-height:480px;overflow-y:auto"><table class="mtbl" style="border-collapse:collapse"><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table></div>';
 }}
 
 // ── Planted area ───────────────────────────────────────────────────────────
@@ -1657,10 +1920,37 @@ function drawDiagB(cid,lbls,wr,mr,cr,col){{
 // ── Print ──────────────────────────────────────────────────────────────────
 function printPDF(){{
   refreshSummary();
+  // For Weekly/Monthly/Cumulative: inject a page-break div between TX and US sections
+  ["t3","t4","t5"].forEach(function(tid){{
+    var panel=document.getElementById(tid);
+    if(!panel)return;
+    // Insert page-break marker between TX grid and US grid heading
+    var usSt=panel.querySelectorAll(".st")[1]; // second .st = US heading
+    if(usSt&&!usSt.previousElementSibling.classList.contains("print-pb")){{
+      var pb=document.createElement("div");
+      pb.className="print-pb";
+      pb.style.cssText="display:none";  // hidden on screen
+      pb.setAttribute("style","page-break-before:always;display:block");
+      panel.insertBefore(pb,usSt);
+    }}
+  }});
+  // For Production: inject page-break between matrices and grids
+  var t6=document.getElementById("t6");
+  if(t6){{
+    var gridSt=t6.querySelector(".st:nth-of-type(2)"); // Sensitivity Grids heading
+    if(gridSt&&(!gridSt.previousElementSibling||!gridSt.previousElementSibling.classList.contains("print-pb"))){{
+      var pb2=document.createElement("div");
+      pb2.className="print-pb";
+      pb2.setAttribute("style","page-break-before:always;display:block");
+      t6.insertBefore(pb2,gridSt);
+    }}
+  }}
   document.querySelectorAll(".panel").forEach(function(p){{p.style.display="block";}});
   window.print();
   document.querySelectorAll(".panel").forEach(function(p){{p.style.display="";}});
   document.querySelectorAll(".panel.active").forEach(function(p){{p.style.display="block";}});
+  // Remove injected page-break divs
+  document.querySelectorAll(".print-pb").forEach(function(el){{el.remove();}});
 }}
 
 // ── Init ───────────────────────────────────────────────────────────────────
@@ -1674,16 +1964,21 @@ window.onload=function(){{
   drawLast6();
   drawSeasonChartsUS();
   drawLast6US();
-  drawScSet("sc-w",WK);drawScSet("sc-m",MO);drawScSet("sc-c",CU);
-  drawTblSet("tbl-w",WK,"label");drawTblSet("tbl-m",MO,"label");drawTblSet("tbl-c",CU,"label");
+  // Weekly/Monthly/Cumulative: TX top, US bottom
+  drawScSet("sc-w-tx",WK);  drawScSet("sc-w-us",WK_US);
+  drawScSet("sc-m-tx",MO);  drawScSet("sc-m-us",MO_US);
+  drawScSet("sc-c-tx",CU);  drawScSet("sc-c-us",CU_US);
+  drawTblSet("tbl-w",WK,"label");
+  drawTblSet("tbl-m",MO,"label");
+  drawTblSet("tbl-c",CU,"label");
   initBanner();
 }};
 window.onresize=function(){{
   drawSeasonCharts();
   drawSeasonChartsUS();
-  drawScSet("sc-w",GEO_STATE.wk==="US"?WK_US:WK);
-  drawScSet("sc-m",GEO_STATE.mo==="US"?MO_US:MO);
-  drawScSet("sc-c",GEO_STATE.cu==="US"?CU_US:CU);
+  drawScSet("sc-w-tx",WK); drawScSet("sc-w-us",WK_US);
+  drawScSet("sc-m-tx",MO); drawScSet("sc-m-us",MO_US);
+  drawScSet("sc-c-tx",CU); drawScSet("sc-c-us",CU_US);
 }};
 </script>
 </body>
@@ -1708,7 +2003,7 @@ def main():
     print("\nLoading data…")
     cotton  = load_cotton(COTTON_CSV)
     drought_tx = load_drought(DROUGHT_CSV)
-    drought_us = load_drought(DROUGHT_US_CSV) 
+    drought_us = load_drought(DROUGHT_US_CSV) if has_us_drought else drought_tx
 
     # TX abandonment for TX drought models
     ab_tx = get_tx(cotton)
@@ -1718,27 +2013,19 @@ def main():
     print(f"  TX abandonment: {len(ab_tx)} years")
 
     # US abandonment for US drought models
-    ab_us = build_us_ab(cotton)
+    ab_us = build_us_ab(cotton)  # already calls .dropna() internally
     if ab_us is None:
-        ab_us = ab_tx  # fallback
-        print("  US abandonment: using TX as proxy")
-
-    # US abandonment for US drought models (from all-states CSV)
-    us_rows = cotton[cotton["geography"]==US_GEO]
-    if not us_rows.empty and "abandonment" in us_rows.columns:
-        ab_us = us_rows.set_index("mkt_year")["abandonment"]
-    else:
         # Derive US abandonment from state sum if US row missing
         non_us = cotton[~cotton["geography"].isin([US_GEO])].copy()
         if not non_us.empty and "upland_cotton_planted_acreage" in non_us.columns:
             grp = non_us.groupby("mkt_year").apply(
                 lambda g: 1 - g["upland_cotton_harvested_acreage"].sum()
                             / g["upland_cotton_planted_acreage"].sum()
-            ).clip(0,1)
-            ab_us = grp
+            ).clip(0, 1)
+            ab_us = grp.dropna()
             print(f"  US abandonment derived from state sum: {len(ab_us)} years")
         else:
-            ab_us = ab_tx  # fallback
+            ab_us = ab_tx
             print("  US abandonment: using TX as proxy (upload full all-states CSV)")
 
     print("\nBuilding TX regression models…")
