@@ -1708,7 +1708,7 @@ def main():
     print("\nLoading data…")
     cotton  = load_cotton(COTTON_CSV)
     drought_tx = load_drought(DROUGHT_CSV)
-    drought_us = load_drought(DROUGHT_US_CSV) if has_us_drought else drought_tx
+    drought_us = load_drought(DROUGHT_US_CSV) 
 
     # TX abandonment for TX drought models
     ab_tx = get_tx(cotton)
