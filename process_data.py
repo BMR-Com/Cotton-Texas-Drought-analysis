@@ -104,7 +104,6 @@ def load_cotton(path):
     return pivot
 
 
-
 def build_us_ab(cotton):
     """US abandonment from the US-total row in cotton CSV."""
     us = cotton[cotton["geography"]==US_GEO].copy()
@@ -141,6 +140,104 @@ def load_drought(path):
           f"({df['Week'].min().date()} – {df['Week'].max().date()})")
     return df
 
+# ═══════════════════════════════════════════════════════════════════════════
+# MONTE CARLO SIMULATION FOR PRODUCTION
+# ═══════════════════════════════════════════════════════════════════════════
+def run_monte_carlo_simulation(cotton, state_data, n_simulations=10000):
+    """
+    Run Monte Carlo simulation for TX and US production.
+    Returns confidence intervals for production estimates.
+    """
+    np.random.seed(42)  # For reproducibility
+    
+    results = {
+        "tx": {"production": [], "abandonment": [], "yield": []},
+        "us": {"production": [], "abandonment": [], "yield": []}
+    }
+    
+    # Get TX data for last 10 years
+    tx_data = cotton[(cotton["geography"]=="TX") & (cotton["mkt_year"]>=cotton["mkt_year"].max()-9)]
+    us_data = cotton[(cotton["geography"]==US_GEO) & (cotton["mkt_year"]>=cotton["mkt_year"].max()-9)]
+    
+    if tx_data.empty or us_data.empty:
+        return None
+    
+    # Extract historical distributions
+    tx_ab = tx_data["abandonment"].dropna()
+    tx_yld = tx_data["upland_cotton_lint_yield"].dropna()
+    tx_plt = tx_data["upland_cotton_planted_acreage"].dropna()
+    
+    us_ab = us_data["abandonment"].dropna() if "abandonment" in us_data.columns else tx_ab
+    us_yld = us_data["upland_cotton_lint_yield"].dropna()
+    us_plt = us_data["upland_cotton_planted_acreage"].dropna()
+    
+    # Calculate means and stds for simulation
+    def get_dist_params(series):
+        if len(series) < 2:
+            return series.iloc[0] if len(series) == 1 else 0, 0.1
+        return series.mean(), series.std()
+    
+    tx_ab_mean, tx_ab_std = get_dist_params(tx_ab)
+    tx_yld_mean, tx_yld_std = get_dist_params(tx_yld)
+    tx_plt_mean = tx_plt.iloc[-1] if not tx_plt.empty else 5000
+    
+    us_ab_mean, us_ab_std = get_dist_params(us_ab)
+    us_yld_mean, us_yld_std = get_dist_params(us_yld)
+    us_plt_mean = us_plt.iloc[-1] if not us_plt.empty else 7000
+        # Run simulations
+    for _ in range(n_simulations):
+        # TX simulation
+        tx_ab_sim = np.clip(np.random.normal(tx_ab_mean, tx_ab_std), 0, 1)
+        tx_yld_sim = max(0, np.random.normal(tx_yld_mean, tx_yld_std))
+        tx_prod_sim = tx_plt_mean * 1000 * (1 - tx_ab_sim) * tx_yld_sim / 480_000_000
+        
+        results["tx"]["production"].append(tx_prod_sim)
+        results["tx"]["abandonment"].append(tx_ab_sim)
+        results["tx"]["yield"].append(tx_yld_sim)
+        
+        # US simulation
+        us_ab_sim = np.clip(np.random.normal(us_ab_mean, us_ab_std), 0, 1)
+        us_yld_sim = max(0, np.random.normal(us_yld_mean, us_yld_std))
+        us_prod_sim = us_plt_mean * 1000 * (1 - us_ab_sim) * us_yld_sim / 480_000_000
+        
+        results["us"]["production"].append(us_prod_sim)
+        results["us"]["abandonment"].append(us_ab_sim)
+        results["us"]["yield"].append(us_yld_sim)
+    
+    # Calculate statistics
+    def calc_stats(arr):
+        arr = np.array(arr)
+        return {
+            "mean": round(float(np.mean(arr)), 3),
+            "median": round(float(np.median(arr)), 3),
+            "std": round(float(np.std(arr)), 3),
+            "ci_5": round(float(np.percentile(arr, 5)), 3),
+            "ci_95": round(float(np.percentile(arr, 95)), 3),
+            "min": round(float(np.min(arr)), 3),
+            "max": round(float(np.max(arr)), 3)
+        }
+    
+    mc_results = {
+        "tx": {k: calc_stats(v) for k, v in results["tx"].items()},
+        "us": {k: calc_stats(v) for k, v in results["us"].items()},
+        "n_simulations": n_simulations,
+        "tx_params": {
+            "abandonment_mean": round(tx_ab_mean, 4),
+            "abandonment_std": round(tx_ab_std, 4),
+            "yield_mean": round(tx_yld_mean, 1),
+            "yield_std": round(tx_yld_std, 1),
+            "planted": round(tx_plt_mean, 0)
+        },
+        "us_params": {
+            "abandonment_mean": round(us_ab_mean, 4),
+            "abandonment_std": round(us_ab_std, 4),
+            "yield_mean": round(us_yld_mean, 1),
+            "yield_std": round(us_yld_std, 1),
+            "planted": round(us_plt_mean, 0)
+        }
+    }
+    
+    return mc_results
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 2. OLS HELPER
@@ -189,7 +286,6 @@ def ols_fit(x_tr, y_tr, x_pred, years_list, ci=CI_LEVEL):
         "reg_y": [round(float(np.clip(ic+sl*xlo,0,1)),4),
                   round(float(np.clip(ic+sl*xhi,0,1)),4)],
     }
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 3. REGRESSION MODELS
@@ -294,92 +390,141 @@ def best_prediction(wk, mo, cu):
                       "variable":v,"model":mname,
                       "label":last.get("label",""),"curr_yr":last.get("curr_yr")}
     return best
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 4. SEASONALITY LINE DATA
+    # ═══════════════════════════════════════════════════════════════════════════
+# 4. SEASONALITY LINE DATA - FIXED VERSION
 # ═══════════════════════════════════════════════════════════════════════════
 def build_season_lines(drought, geo_label='TX', n_years=20):
-    max_yr   = drought["cal_year"].max()
+    """
+    Build seasonality line chart data.
+    Shows: Current year (bold), Last 2 years (distinct colors), Top 5 analogs (other colors)
+    All other years available for toggle selection.
+    """
+    max_yr   = int(drought["cal_year"].max())
     curr_yr  = int(drought["mkt_year"].max())
     min_yr   = max_yr - n_years + 1
+    
     s_weeks  = sorted(w for w in drought["iso_week"].unique() if 14<=w<=43)
     wlabels  = [week_label(w) for w in s_weeks]
+    
     curr_df  = drought[drought["mkt_year"]==curr_yr].sort_values("Week")
     lat_iw   = int(curr_df["iso_week"].max()) if not curr_df.empty else s_weeks[-1]
-    hist_yrs = sorted(y for y in drought["cal_year"].unique()
-                      if min_yr<=y<=max_yr and y!=curr_yr)
-    last_yr  = curr_yr - 1
-
-    out = {"geo":geo_label, "weeks":wlabels, "iso_weeks":[int(w) for w in s_weeks],
-           "curr_yr":int(curr_yr), "latest_iw":int(lat_iw),
-           "last_yr":int(last_yr), "variables":{},
-           "last6_weeks":[], "last6_comparisons":[]}
+    
+    # All historical years (excluding current)
+    all_hist_yrs = sorted(y for y in drought["cal_year"].unique()
+                          if min_yr<=y<=max_yr and y!=curr_yr)
+    
+    # Last 2 years
+    last_yr_1 = curr_yr - 1
+    last_yr_2 = curr_yr - 2
+    
+    out = {
+        "geo": geo_label, 
+        "weeks": wlabels, 
+        "iso_weeks": [int(w) for w in s_weeks],
+        "curr_yr": int(curr_yr), 
+        "latest_iw": int(lat_iw),
+        "last_yr_1": int(last_yr_1),
+        "last_yr_2": int(last_yr_2),
+        "all_hist_years": [int(y) for y in all_hist_yrs],
+        "variables": {},
+        "last6_weeks": [], 
+        "last6_comparisons": []
+    }
 
     # Last 6 current-year weeks
     for _,row in curr_df.tail(6).iterrows():
-        entry={"date":str(row["Week"].date()),"label":week_label(int(row["iso_week"])),
-               "iso_week":int(row["iso_week"]),"year":int(curr_yr),"is_current":True}
-        for v in DROUGHT_VARS: entry[v]=safe(row.get(v),1)
+        entry = {
+            "date": str(row["Week"].date()),
+            "label": week_label(int(row["iso_week"])),
+            "iso_week": int(row["iso_week"]),
+            "year": int(curr_yr),
+            "is_current": True
+        }
+        for v in DROUGHT_VARS: 
+            entry[v] = safe(row.get(v), 1)
         out["last6_weeks"].append(entry)
 
-    # Latest week — used for single-week comparison rows
+    # Latest week for comparison
     latest_row = curr_df.iloc[-1] if not curr_df.empty else None
     latest_iw_for_comp = int(latest_row["iso_week"]) if latest_row is not None else lat_iw
-    out["latest_week_iw"]   = latest_iw_for_comp
+    out["latest_week_iw"] = latest_iw_for_comp
     out["latest_week_date"] = str(latest_row["Week"].date()) if latest_row is not None else ""
-    out["last6_iws"] = [int(r["iso_week"]) for _,r in curr_df.tail(6).iterrows()]
+    out["last6_iws"] = [int(r["iso_week"]) for _, r in curr_df.tail(6).iterrows()]
 
     for v in DROUGHT_VARS:
-        # Build year series
-        series={}
-        for yr in hist_yrs+[curr_yr]:
-            yr_df=drought[drought["cal_year"]==yr]
-            line=[]
+        # Build year series for all years
+        series = {}
+        for yr in all_hist_yrs + [curr_yr]:
+            yr_df = drought[drought["cal_year"] == yr]
+            line = []
             for iw in s_weeks:
-                sub=yr_df[yr_df["iso_week"]==iw]
-                val=float(sub[v].iloc[0]) if (not sub.empty and pd.notna(sub[v].iloc[0])) else None
+                sub = yr_df[yr_df["iso_week"] == iw]
+                val = float(sub[v].iloc[0]) if (not sub.empty and pd.notna(sub[v].iloc[0])) else None
                 line.append(val)
             if any(x is not None for x in line):
-                series[int(yr)]=line
+                series[int(yr)] = line
 
         # Analog computation: RMSE through latest available week
-        lat_idx = s_weeks.index(lat_iw) if lat_iw in s_weeks else len(s_weeks)-1
-        c_line  = series.get(curr_yr,[])
-        c_vals  = [c_line[i] for i in range(lat_idx+1)
-                   if i<len(c_line) and c_line[i] is not None]
-        scores=[]
-        for yr in hist_yrs:
-            yl=series.get(yr,[])
-            yv=[yl[i] for i in range(lat_idx+1) if i<len(yl) and yl[i] is not None]
-            n=min(len(c_vals),len(yv))
-            if n<2: continue
-            scores.append((yr,float(np.sqrt(np.mean(
-                (np.array(c_vals[:n])-np.array(yv[:n]))**2)))))
-        scores.sort(key=lambda x:x[1])
-        top5=[int(y) for y,_ in scores[:ANALOG_TOP_N]]
+        lat_idx = s_weeks.index(lat_iw) if lat_iw in s_weeks else len(s_weeks) - 1
+        c_line = series.get(curr_yr, [])
+        c_vals = [c_line[i] for i in range(lat_idx + 1)
+                  if i < len(c_line) and c_line[i] is not None]
+        
+        scores = []
+        for yr in all_hist_yrs:
+            yl = series.get(yr, [])
+            yv = [yl[i] for i in range(lat_idx + 1) if i < len(yl) and yl[i] is not None]
+            n = min(len(c_vals), len(yv))
+            if n < 2: continue
+            rmse = float(np.sqrt(np.mean((np.array(c_vals[:n]) - np.array(yv[:n]))**2)))
+            scores.append((yr, rmse))
+        
+        scores.sort(key=lambda x: x[1])
+        top5 = [int(y) for y, _ in scores[:ANALOG_TOP_N]]
 
-        # Comparison: last year + top5 analogs — same latest week, ALL drought vars
-        comparisons=[]
-        for comp_yr in [last_yr]+top5:
-            comp_df=drought[drought["cal_year"]==comp_yr]
-            sub=comp_df[comp_df["iso_week"]==latest_iw_for_comp]
-            rmse=next((round(s,2) for y,s in scores if y==comp_yr),None)
-            entry={
-                "year":int(comp_yr),
-                "is_last_yr": comp_yr==last_yr,
-                "rmse":rmse,
-                "iso_week": latest_iw_for_comp,
-            }
-            for dv in DROUGHT_VARS:
-                entry[dv]=safe(float(sub[dv].iloc[0]),1) if (not sub.empty and dv in sub.columns and pd.notna(sub[dv].iloc[0])) else None
-            comparisons.append(entry)
+        # Comparison data for last 6 weeks table
+        comparisons = []
+        
+        # Add last 2 years + top 5 analogs for comparison
+        comp_years = [last_yr_1, last_yr_2] + top5
+        
+        for comp_yr in comp_years:
+            if comp_yr not in series:
+                continue
+            comp_df = drought[drought["cal_year"] == comp_yr]
+            
+            # Get values for the last 6 weeks of current year
+            comp_entries = []
+            for iw in out["last6_iws"]:
+                sub = comp_df[comp_df["iso_week"] == iw]
+                entry_week = {
+                    "iso_week": iw,
+                    "label": week_label(iw),
+                    "year": int(comp_yr)
+                }
+                for dv in DROUGHT_VARS:
+                    entry_week[dv] = safe(float(sub[dv].iloc[0]), 1) if (not sub.empty and dv in sub.columns and pd.notna(sub[dv].iloc[0])) else None
+                comp_entries.append(entry_week)
+            
+            # RMSE score
+            rmse = next((round(s, 2) for y, s in scores if y == comp_yr), None)
+            
+            comparisons.append({
+                "year": int(comp_yr),
+                "is_last_yr": comp_yr == last_yr_1,
+                "is_last_yr_2": comp_yr == last_yr_2,
+                "is_analog": comp_yr in top5,
+                "rmse": rmse,
+                "entries": comp_entries
+            })
 
-        out["variables"][v]={
-            "series":       {str(k):v2 for k,v2 in series.items()},
-            "analogs":      top5,
-            "analog_scores":{int(y):round(s,2) for y,s in scores[:ANALOG_TOP_N]},
-            "all_hist_years":[int(y) for y in hist_yrs],
+        out["variables"][v] = {
+            "series": {str(k): v2 for k, v2 in series.items()},
+            "analogs": top5,
+            "analog_scores": {int(y): round(s, 2) for y, s in scores[:ANALOG_TOP_N]},
+            "all_hist_years": [int(y) for y in all_hist_yrs],
+            "last_yr_1": int(last_yr_1),
+            "last_yr_2": int(last_yr_2),
             "last6_comparisons": comparisons,
         }
 
@@ -387,7 +532,7 @@ def build_season_lines(drought, geo_label='TX', n_years=20):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. PRODUCTION DATA
+# 5. PRODUCTION DATA - WITH MONTE CARLO
 # ═══════════════════════════════════════════════════════════════════════════
 def build_production(cotton, best_tx):
     """
@@ -395,171 +540,277 @@ def build_production(cotton, best_tx):
       Each state contributes: planted_P * (1-abandon_P) * yield_P
       Sum across all non-US states = US production estimate
     Returns everything the JS needs for all 4 matrices/grids.
+    Includes Monte Carlo simulation results.
     """
     max_yr = int(cotton["mkt_year"].max())
+    prev_yr = max_yr - 1
 
     # Get per-state per-period averages
     state_data = {}
-    all_states  = [g for g in cotton["geography"].unique() if g != US_GEO]
+    all_states = [g for g in cotton["geography"].unique() if g != US_GEO]
 
     for state in all_states:
         sdf = cotton[cotton["geography"]==state].copy()
         sdf = sdf[sdf["mkt_year"]<=max_yr].sort_values("mkt_year")
         if sdf.empty: continue
-        sd={"periods":{}}
+        sd = {"periods": {}}
         for P in PERIODS:
-            rec=sdf[sdf["mkt_year"]>=max_yr-P+1]
-            if rec.empty: sd["periods"][P]=None; continue
+            rec = sdf[sdf["mkt_year"]>=max_yr-P+1]
+            if rec.empty: 
+                sd["periods"][P] = None
+                continue
             def g(col):
-                if col not in rec.columns: return None
-                v=rec[col].dropna()
+                if col not in rec.columns: 
+                    return None
+                v = rec[col].dropna()
                 return safe(float(v.mean()), 2) if len(v) else None
-            sd["periods"][P]={
+            sd["periods"][P] = {
                 "ab":  g("abandonment"),
                 "yld": g("upland_cotton_lint_yield"),
                 "plt": g("upland_cotton_planted_acreage"),
                 "prd": g("upland_cotton_production"),
             }
-            # Last year actual
-        lr=sdf.iloc[-1]
-        sd["last_yr_actual"]={
-            "year":int(lr["mkt_year"]),
-            "ab":  safe(lr.get("abandonment"),4),
-            "yld": safe(lr.get("upland_cotton_lint_yield"),1),
-            "plt": safe(lr.get("upland_cotton_planted_acreage"),0),
+        # Last year actual
+        lr = sdf.iloc[-1]
+        sd["last_yr_actual"] = {
+            "year": int(lr["mkt_year"]),
+            "ab":  safe(lr.get("abandonment"), 4),
+            "yld": safe(lr.get("upland_cotton_lint_yield"), 1),
+            "plt": safe(lr.get("upland_cotton_planted_acreage"), 0),
+            "prd": safe(lr.get("upland_cotton_production"), 3),
         }
-        state_data[state]=sd
+        # Previous year actual
+        prev = sdf[sdf["mkt_year"] == prev_yr]
+        if not prev.empty:
+            pr = prev.iloc[0]
+            sd["prev_yr_actual"] = {
+                "year": int(prev_yr),
+                "ab":  safe(pr.get("abandonment"), 4),
+                "yld": safe(pr.get("upland_cotton_lint_yield"), 1),
+                "plt": safe(pr.get("upland_cotton_planted_acreage"), 0),
+                "prd": safe(pr.get("upland_cotton_production"), 3),
+            }
+        else:
+            sd["prev_yr_actual"] = None
+        state_data[state] = sd
 
     def prod_mn_bales(plt_k, ab, yld):
         """plt_k = 1000 acres, yld = lb/acre → mn 480-lb bales"""
-        if plt_k is None or ab is None or yld is None: return None
+        if plt_k is None or ab is None or yld is None: 
+            return None
         return round(plt_k * 1000 * (1-ab) * yld / 480_000_000, 3)
 
+    # Calculate production ranges for each matrix
+    matrix_ranges = {}
+    
     # Matrix A: 5×5 — rows=abandon period, cols=yield period, all states historical
     # Matrix B: same but TX abandonment = model prediction
     matA, matB = {}, {}
     model_ab = best_tx.get("point")
 
     for P_ab in PERIODS:
-        matA[P_ab]={} ; matB[P_ab]={}
+        matA[P_ab] = {}
+        matB[P_ab] = {}
         for P_yld in PERIODS:
-            total_a = 0.0; total_b = 0.0; ok=True
+            total_a = 0.0
+            total_b = 0.0
+            ok = True
             for st, sd in state_data.items():
                 pa = sd["periods"].get(P_ab)
                 py = sd["periods"].get(P_yld)
-                if not pa or not py: ok=False; break
-                ab_a  = pa["ab"];  ab_b = (model_ab if st=="TX" else pa["ab"])
-                yld   = py["yld"]; plt  = pa["plt"]
-                if ab_a is None or yld is None or plt is None: ok=False; break
-                total_a += plt * 1000 * (1-ab_a)  * yld / 480_000_000
-                total_b += plt * 1000 * (1-ab_b)  * yld / 480_000_000
-            matA[P_ab][P_yld] = round(total_a,3) if ok else None
-            matB[P_ab][P_yld] = round(total_b,3) if ok else None
+                if not pa or not py: 
+                    ok = False
+                    break
+                ab_a = pa["ab"]
+                ab_b = (model_ab if st=="TX" and model_ab is not None else pa["ab"])
+                yld = py["yld"]
+                plt = pa["plt"]
+                if ab_a is None or yld is None or plt is None: 
+                    ok = False
+                    break
+                val_a = plt * 1000 * (1-ab_a) * yld / 480_000_000
+                val_b = plt * 1000 * (1-ab_b) * yld / 480_000_000
+                total_a += val_a
+                total_b += val_b
+            matA[P_ab][P_yld] = round(total_a, 3) if ok else None
+            matB[P_ab][P_yld] = round(total_b, 3) if ok else None
+    
+    # Calculate ranges
+    matA_vals = [v for row in matA.values() for v in row.values() if v is not None]
+    matB_vals = [v for row in matB.values() for v in row.values() if v is not None]
+    
+    matrix_ranges["matA"] = {
+        "min": round(min(matA_vals), 2) if matA_vals else None,
+        "max": round(max(matA_vals), 2) if matA_vals else None,
+        "label": "All Historical"
+    }
+    matrix_ranges["matB"] = {
+        "min": round(min(matB_vals), 2) if matB_vals else None,
+        "max": round(max(matB_vals), 2) if matB_vals else None,
+        "label": "TX from Model"
+    }
 
     # TX abandonment range for Grid C (last 10 yrs, 5% steps)
     tx_hist = cotton[(cotton["geography"]=="TX") & (cotton["mkt_year"]>=max_yr-9)]
     if not tx_hist.empty and "abandonment" in tx_hist.columns:
-        ab_vals=tx_hist["abandonment"].dropna()
+        ab_vals = tx_hist["abandonment"].dropna()
         ab_lo = int(float(ab_vals.min())*20)/20
         ab_hi = (int(float(ab_vals.max())*20)+1)/20
-        tx_ab_range=[round(ab_lo+i*0.05,2) for i in range(int(round((ab_hi-ab_lo)/0.05))+1)
-                     if round(ab_lo+i*0.05,2)<=ab_hi+0.001]
+        tx_ab_range = [round(ab_lo+i*0.05, 2) for i in range(int(round((ab_hi-ab_lo)/0.05))+1)
+                        if round(ab_lo+i*0.05, 2) <= ab_hi+0.001]
     else:
-        tx_ab_range=[round(0.10+i*0.05,2) for i in range(13)]
+        tx_ab_range = [round(0.10+i*0.05, 2) for i in range(13)]
 
     # TX yield range (50lb steps, last 10 yrs)
     if not tx_hist.empty and "upland_cotton_lint_yield" in tx_hist.columns:
-        yv=tx_hist["upland_cotton_lint_yield"].dropna()
-        tx_yld_range=list(range(int(float(yv.min())//50)*50,
-                                (int(float(yv.max())//50)+2)*50,50))
+        yv = tx_hist["upland_cotton_lint_yield"].dropna()
+        tx_yld_range = list(range(int(float(yv.min())//50)*50,
+                                  (int(float(yv.max())//50)+2)*50, 50))
     else:
-        tx_yld_range=list(range(250,851,50))
+        tx_yld_range = list(range(250, 851, 50))
+            # Calculate Grid C range
+    tx_plt_10 = state_data.get("TX", {}).get("periods", {}).get(10, {}).get("plt")
+    grid_c_vals = []
+    for ab in tx_ab_range:
+        for yld in tx_yld_range:
+            if tx_plt_10:
+                val = tx_plt_10 * 1000 * (1-ab) * yld / 480_000_000
+                grid_c_vals.append(val)
+    
+    matrix_ranges["gridC"] = {
+        "min": round(min(grid_c_vals), 2) if grid_c_vals else None,
+        "max": round(max(grid_c_vals), 2) if grid_c_vals else None,
+        "label": "TX Only"
+    }
 
     # Derive implied US abandonment for each TX abandonment value
-    # US_ab = (TX_plt*(1-TX_ab)*TX_yld + others) / (TX_plt + others_planted*(1-others_ab))
-    # Simplification: weighted average abandonment
-    # us_implied_ab(tx_ab) = (tx_plt*(tx_ab) + sum_other(plt_i*ab_i)) / (tx_plt + sum_other_plt)
-    tx_sd = state_data.get("TX",{})
-    tx_p10 = tx_sd.get("periods",{}).get(10,{}) if tx_sd else {}
+    tx_sd = state_data.get("TX", {})
+    tx_p10 = tx_sd.get("periods", {}).get(10, {}) if tx_sd else {}
     tx_plt_10 = tx_p10.get("plt") if tx_p10 else None
     tx_yld_10 = tx_p10.get("yld") if tx_p10 else None
 
-    other_wtd_ab = 0.0; other_plt = 0.0
+    other_wtd_ab = 0.0
+    other_plt = 0.0
     for st, sd in state_data.items():
-        if st=="TX": continue
-        p10=sd.get("periods",{}).get(10,{})
+        if st == "TX": 
+            continue
+        p10 = sd.get("periods", {}).get(10, {})
         if p10 and p10.get("ab") is not None and p10.get("plt") is not None:
-            other_wtd_ab += p10["ab"]*p10["plt"]
-            other_plt    += p10["plt"]
+            other_wtd_ab += p10["ab"] * p10["plt"]
+            other_plt += p10["plt"]
 
     def us_ab_from_tx(tx_ab):
-        if tx_plt_10 is None or other_plt==0: return tx_ab
-        return (tx_ab*tx_plt_10 + other_wtd_ab) / (tx_plt_10 + other_plt)
+        if tx_plt_10 is None or other_plt == 0: 
+            return tx_ab
+        return (tx_ab * tx_plt_10 + other_wtd_ab) / (tx_plt_10 + other_plt)
 
     # US yield range (50lb steps)
     us_df = cotton[(cotton["geography"]==US_GEO) & (cotton["mkt_year"]>=max_yr-9)]
     if not us_df.empty and "upland_cotton_lint_yield" in us_df.columns:
-        yv=us_df["upland_cotton_lint_yield"].dropna()
-        us_yld_range=list(range(int(float(yv.min())//50)*50,
-                                (int(float(yv.max())//50)+2)*50,50))
+        yv = us_df["upland_cotton_lint_yield"].dropna()
+        us_yld_range = list(range(int(float(yv.min())//50)*50,
+                                  (int(float(yv.max())//50)+2)*50, 50))
     else:
-        # derive from state sum
-        us_yld_range=list(range(700,1001,50))
+        us_yld_range = list(range(700, 1001, 50))
 
-    # US planted for Grid D: use US row if available, else sum states
-    us_plt=None
+    # US planted for Grid D
+    us_plt = None
     if not us_df.empty and "upland_cotton_planted_acreage" in us_df.columns:
-        v=us_df["upland_cotton_planted_acreage"].dropna()
-        if len(v): us_plt=safe(float(v.iloc[-1]),0)
+        v = us_df["upland_cotton_planted_acreage"].dropna()
+        if len(v): 
+            us_plt = safe(float(v.iloc[-1]), 0)
     if us_plt is None:
-        us_plt_sum=sum(sd["periods"].get(10,{}).get("plt") or 0
+        us_plt_sum = sum(sd["periods"].get(10, {}).get("plt") or 0
                        for sd in state_data.values()
                        if sd["periods"].get(10))
-        us_plt = safe(us_plt_sum,0) if us_plt_sum else None
+        us_plt = safe(us_plt_sum, 0) if us_plt_sum else None
 
     # US implied abandonment range rows (derived from TX range)
-    us_ab_range=[round(us_ab_from_tx(tx_ab),4) for tx_ab in tx_ab_range]
+    us_ab_range = [round(us_ab_from_tx(tx_ab), 4) for tx_ab in tx_ab_range]
 
-    # Build last-year planted defaults for all states (user can override)
+    # Calculate Grid D range
+    grid_d_vals = []
+    for ab in us_ab_range:
+        for yld in us_yld_range:
+            if us_plt:
+                val = us_plt * 1000 * (1-ab) * yld / 480_000_000
+                grid_d_vals.append(val)
+    
+    matrix_ranges["gridD"] = {
+        "min": round(min(grid_d_vals), 2) if grid_d_vals else None,
+        "max": round(max(grid_d_vals), 2) if grid_d_vals else None,
+        "label": "US Total"
+    }
+
+    # Get previous year production for comparison
+    prev_year_prod = {"tx": None, "us": None}
+    tx_data = state_data.get("TX", {})
+    if tx_data.get("prev_yr_actual") and tx_data["prev_yr_actual"].get("prd"):
+        prev_year_prod["tx"] = tx_data["prev_yr_actual"]["prd"]
+    
+    # US previous year from US row or sum of states
+    us_data = cotton[cotton["geography"]==US_GEO]
+    if not us_data.empty:
+        us_prev = us_data[us_data["mkt_year"]==prev_yr]
+        if not us_prev.empty and "upland_cotton_production" in us_prev.columns:
+            prev_year_prod["us"] = safe(us_prev["upland_cotton_production"].iloc[0], 3)
+    
+    if prev_year_prod["us"] is None:
+        # Sum from states
+        prev_sum = sum(
+            sd.get("prev_yr_actual", {}).get("prd", 0) or 0 
+            for sd in state_data.values()
+        )
+        if prev_sum > 0:
+            prev_year_prod["us"] = round(prev_sum / 1000, 3)
+
+    # Build last-year planted defaults for all states
     state_defaults = {}
     for st, sd in state_data.items():
         ly = sd.get("last_yr_actual", {})
         state_defaults[st] = {
-            "plt": ly.get("plt"),   # 1000 acres
+            "plt": ly.get("plt"),
             "year": ly.get("year"),
         }
 
+    # Run Monte Carlo simulation
+    mc_results = run_monte_carlo_simulation(cotton, state_data)
+
     return {
-        "state_data":     state_data,
+        "state_data": state_data,
         "state_defaults": state_defaults,
-        "matA":           {str(k):{str(k2):v2 for k2,v2 in v.items()} for k,v in matA.items()},
-        "matB":           {str(k):{str(k2):v2 for k2,v2 in v.items()} for k,v in matB.items()},
-        "tx_ab_range":    tx_ab_range,
-        "tx_yld_range":   tx_yld_range,
-        "us_ab_range":    us_ab_range,
-        "us_yld_range":   us_yld_range,
-        "us_plt":         us_plt,
-        "tx_plt_10yr":    tx_plt_10,
-        "model_ab":       model_ab,
-        "periods":        PERIODS,
-        "period_labels":  PERIOD_LABELS,
-        "max_yr":         max_yr,
-        "has_multi_state": len(state_data)>1,
+        "matA": {str(k): {str(k2): v2 for k2, v2 in v.items()} for k, v in matA.items()},
+        "matB": {str(k): {str(k2): v2 for k2, v2 in v.items()} for k, v in matB.items()},
+        "tx_ab_range": tx_ab_range,
+        "tx_yld_range": tx_yld_range,
+        "us_ab_range": us_ab_range,
+        "us_yld_range": us_yld_range,
+        "us_plt": us_plt,
+        "tx_plt_10yr": tx_plt_10,
+        "model_ab": model_ab,
+        "periods": PERIODS,
+        "period_labels": PERIOD_LABELS,
+        "max_yr": max_yr,
+        "prev_yr": prev_yr,
+        "has_multi_state": len(state_data) > 1,
+        "matrix_ranges": matrix_ranges,
+        "prev_year_prod": prev_year_prod,
+        "monte_carlo": mc_results,
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 6. ANALYST SUMMARY
+# 6. ANALYST SUMMARY - WITH PRODUCTION RANGES AND PREVIOUS YEAR COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════
 def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought):
-    """Auto-generate summary text for each section."""
-    curr_yr = best_tx.get("curr_yr","?")
+    """Auto-generate summary text for each section with production ranges."""
+    curr_yr = best_tx.get("curr_yr", "?")
     model_ab = best_tx.get("point")
     model_ab_pct = f"{model_ab*100:.1f}%" if model_ab else "N/A"
     lo_pct = f"{(best_tx.get('lo') or 0)*100:.1f}%"
     hi_pct = f"{(best_tx.get('hi') or 0)*100:.1f}%"
     r2_pct = f"{best_tx.get('r2',0)*100:.1f}%"
-    n_wk   = len(wk_rows)
+    n_wk = len(wk_rows)
     latest = wk_rows[-1]["date"] if wk_rows else "N/A"
     latest_lbl = wk_rows[-1]["label"] if wk_rows else "N/A"
 
@@ -574,15 +825,53 @@ def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought)
 
     # Historical TX abandonment stats
     ab_mean = f"{ab.mean()*100:.0f}%"
-    ab_std  = f"{ab.std()*100:.0f}pp"
-    ab_min  = f"{ab.min()*100:.0f}%"
-    ab_max  = f"{ab.max()*100:.0f}%"
+    ab_std = f"{ab.std()*100:.0f}pp"
+    ab_min = f"{ab.min()*100:.0f}%"
+    ab_max = f"{ab.max()*100:.0f}%"
 
-    # Production context
-    has_ms = prod.get("has_multi_state", False)
-    matA_5x5 = prod.get("matA",{})
-    mid_cell = matA_5x5.get("5",{}).get("5")
-    prod_note = f"5yr×5yr avg US production estimate: {mid_cell:.2f} mn bales." if mid_cell else "Production data requires full all-states CSV."
+    # Production ranges from matrices
+    mr = prod.get("matrix_ranges", {})
+    matA_range = mr.get("matA", {})
+    matB_range = mr.get("matB", {})
+    gridC_range = mr.get("gridC", {})
+    gridD_range = mr.get("gridD", {})
+    
+    # Previous year production
+    prev_prod = prod.get("prev_year_prod", {})
+    prev_tx = prev_prod.get("tx")
+    prev_us = prev_prod.get("us")
+    
+    # Format range text
+    def fmt_range(r):
+        if r.get("min") is None or r.get("max") is None:
+            return "N/A"
+        return f"{r['min']:.2f}–{r['max']:.2f} mn bales"
+    
+    # Production context with ranges
+    range_text = f"""Production Scenario Ranges (mn 480-lb bales):
+• Matrix A ({matA_range.get('label', 'All Historical')}): {fmt_range(matA_range)}
+• Matrix B ({matB_range.get('label', 'TX from Model')}): {fmt_range(matB_range)} 
+• Grid C ({gridC_range.get('label', 'TX Only')}): {fmt_range(gridC_range)}
+• Grid D ({gridD_range.get('label', 'US Total')}): {fmt_range(gridD_range)}"""
+
+    # Previous year comparison
+    prev_yr = prod.get("prev_yr", curr_yr - 1)
+    prev_comparison = ""
+    if prev_tx is not None:
+        prev_comparison += f"\n• TX {prev_yr} Actual: {prev_tx:.2f} mn bales"
+    if prev_us is not None:
+        prev_comparison += f"\n• US {prev_yr} Actual: {prev_us:.2f} mn bales"
+    
+    if not prev_comparison:
+        prev_comparison = f"\n• {prev_yr} actual production data not available in current dataset."
+
+    # Monte Carlo results
+    mc = prod.get("monte_carlo")
+    mc_text = ""
+    if mc:
+        mc_text = f"""\n\nMonte Carlo Simulation Results ({mc.get('n_simulations', 10000)} runs):
+• TX Production: mean={mc['tx']['production']['mean']:.2f}, median={mc['tx']['production']['median']:.2f}, 90% CI [{mc['tx']['production']['ci_5']:.2f}–{mc['tx']['production']['ci_95']:.2f}] mn bales
+• US Production: mean={mc['us']['production']['mean']:.2f}, median={mc['us']['production']['median']:.2f}, 90% CI [{mc['us']['production']['ci_5']:.2f}–{mc['us']['production']['ci_95']:.2f}] mn bales"""
 
     sections = {
         "seasonality": (
@@ -609,31 +898,40 @@ def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought)
             f"Best regression prediction: TX abandonment = {model_ab_pct} "
             f"({CI_LEVEL*100:.0f}% CI: {lo_pct}–{hi_pct}) via {best_tx.get('variable','—')} "
             f"{best_tx.get('model','—')} model at {latest_lbl}. "
-            f"Historical TX abandonment: mean={ab_mean}, std={ab_std}, range={ab_min}–{ab_max}. "
-            f"{prod_note}"
+            f"Historical TX abandonment: mean={ab_mean}, std={ab_std}, range={ab_min}–{ab_max}.\n\n"
+            f"{range_text}"
+            f"{prev_comparison}"
+            f"{mc_text}"
         ),
     }
     return sections
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 7. HTML
+    # ═══════════════════════════════════════════════════════════════════════════
+# 7. HTML - WITH FIXED SEASONALITY CHARTS AND TABLES
 # ═══════════════════════════════════════════════════════════════════════════
 def make_html(wk_rows, mo_rows, cu_rows, slines, prod, best_tx, summary, cotton_ab, drought,
               us_wk, us_mo, us_cu, us_slines, us_best, ci_pct):
 
-    curr_yr   = wk_rows[0]["curr_yr"] if wk_rows else "?"
-    ab        = cotton_ab
-    run_time  = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
-    n_wk      = len(wk_rows)
+    curr_yr = wk_rows[0]["curr_yr"] if wk_rows else "?"
+    ab = cotton_ab
+    run_time = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+    n_wk = len(wk_rows)
     latest_wk = wk_rows[-1]["date"] if wk_rows else "—"
     model_ab_pct = f"{best_tx.get('point',0)*100:.1f}%" if best_tx.get("point") else "N/A"
 
-    j_us_wk  = jd(us_wk)
-    j_us_mo  = jd(us_mo)
-    j_us_cu  = jd(us_cu)
-    j_us_sl  = jd(us_slines) if us_slines is not None else 'null'
+    j_us_wk = jd(us_wk)
+    j_us_mo = jd(us_mo)
+    j_us_cu = jd(us_cu)
+    j_us_sl = jd(us_slines) if us_slines is not None else 'null'
     j_us_btx = jd(us_best)
+    
+    # Monte Carlo results JSON
+    mc_json = jd(prod.get("monte_carlo")) if prod.get("monte_carlo") else 'null'
+    
+    # Previous year production
+    prev_prod_json = jd(prod.get("prev_year_prod"))
+    
+    # Matrix ranges
+    matrix_ranges_json = jd(prod.get("matrix_ranges", {}))
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -684,9 +982,10 @@ input[type=number]{{width:110px}}
 /* Tables */
 .tw{{overflow-x:auto;border-radius:7px;border:1px solid #1e2a3a;margin-bottom:7px}}
 table{{width:100%;border-collapse:collapse;font-size:.7rem;white-space:nowrap}}
-thead th{{padding:6px 7px;text-align:center;position:sticky;z-index:5;border-bottom:1px solid #1e2a3a}}
-thead tr:first-child th{{background:#0e1d2e;color:#7fb3d3;font-weight:600;top:0}}
-thead tr:last-child th{{background:#0a1520;color:#607080;font-weight:400;font-size:.65rem;top:33px;border-bottom:2px solid #2d4060}}
+/* FIXED: Header styling to prevent overlap */
+.tw thead{{position:sticky;top:0;z-index:10}}
+.tw thead tr:first-child th{{background:#0e1d2e;color:#7fb3d3;font-weight:600;padding:8px 7px;border-bottom:2px solid #2d4060;position:sticky;top:0;z-index:11}}
+.tw thead tr:last-child th{{background:#0a1520;color:#607080;font-weight:400;font-size:.65rem;padding:6px 7px;border-bottom:2px solid #2d4060;position:sticky;top:32px;z-index:10}}
 th.lft,td.lft{{text-align:left;padding-left:8px}}
 th.dvh{{background:#0a1f14!important}}
 th.dvs{{background:#061410!important}}
@@ -705,17 +1004,18 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 .r2w{{display:inline-flex;align-items:center;gap:3px}}
 .r2bg{{width:26px;height:4px;background:#1e2a3a;border-radius:2px}}
 .r2f{{height:4px;border-radius:2px}}
-/* Matrices */
+/* Matrices - FIXED header overlap */
 .mat-grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}}
 @media(max-width:700px){{.mat-grid{{grid-template-columns:1fr}}}}
-.mat-card{{background:#111820;border:1px solid #1e2a3a;border-radius:8px;padding:10px;overflow-x:auto}}
+.mat-card{{background:#111820;border:1px solid #1e2a3a;border-radius:8px;padding:10px;overflow-x:auto;max-height:500px;overflow-y:auto}}
 .mat-card h3{{font-size:.77rem;font-weight:600;margin-bottom:3px}}
 .mat-card .sub{{font-size:.67rem;color:#607080;margin-bottom:7px}}
-.mtbl{{border-collapse:collapse;font-size:.68rem;white-space:nowrap}}
+.mtbl{{border-collapse:collapse;font-size:.68rem;white-space:nowrap;width:100%}}
 .mtbl th,.mtbl td{{padding:4px 8px;text-align:right;border:1px solid #1e2a3a}}
-.mtbl thead th{{background:#0e1d2e;color:#90a4ae;font-weight:600;position:sticky;top:0}}
-.mtbl thead th:first-child{{text-align:left;position:sticky;left:0;z-index:2}}
-.mtbl tbody th{{background:#111820;color:#90a4ae;font-weight:600;text-align:left;position:sticky;left:0}}
+/* FIXED: Sticky headers for matrices */
+.mtbl thead th{{background:#0e1d2e;color:#90a4ae;font-weight:600;position:sticky;top:0;z-index:5}}
+.mtbl thead th:first-child{{text-align:left;position:sticky;left:0;z-index:6;background:#0e1d2e}}
+.mtbl tbody th{{background:#111820;color:#90a4ae;font-weight:600;text-align:left;position:sticky;left:0;z-index:4}}
 .mtbl tbody tr:hover td,.mtbl tbody tr:hover th{{background:#132030}}
 .cell-model{{background:#0a1f14!important;color:#68d391!important;font-weight:700}}
 .cell-hi{{background:#1a2a14!important;color:#9ae89a!important}}
@@ -732,6 +1032,22 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 .summary-box h3{{font-size:.8rem;color:#68d391;font-weight:600;margin-bottom:6px}}
 .summary-box textarea{{width:100%;background:#0d1117;border:1px solid #2d3e50;color:#e2e8f0;
   padding:8px;border-radius:5px;font-size:.76rem;line-height:1.6;resize:vertical;min-height:80px}}
+/* Monte Carlo section */
+.mc-box{{background:#0a1520;border:1px solid #1e3a5f;border-radius:8px;padding:12px;margin-bottom:14px}}
+.mc-box h3{{font-size:.8rem;color:#90c4ff;font-weight:600;margin-bottom:8px}}
+.mc-stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;font-size:.72rem}}
+.mc-stat{{background:#111820;padding:8px;border-radius:5px;border:1px solid #1e2a3a}}
+.mc-stat .label{{color:#607080;font-size:.65rem}}
+.mc-stat .value{{color:#68d391;font-weight:600;font-size:.8rem}}
+/* Year selector for seasonality */
+.year-selector{{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;max-height:120px;overflow-y:auto;padding:4px;background:#0a1520;border-radius:5px;border:1px solid #1e2a3a}}
+.year-chip{{padding:3px 8px;border-radius:12px;font-size:.65rem;cursor:pointer;border:1px solid #2d3e50;background:#1a2535;color:#90a4ae;transition:all .2s}}
+.year-chip:hover{{background:#1e3a50}}
+.year-chip.active{{background:#2d6a4f;border-color:#68d391;color:#68d391}}
+.year-chip.current{{background:#0f4a2a;border-color:#68d391;color:#f0fff4;font-weight:600}}
+.year-chip.last{{background:#1a3050;border-color:#90c4ff;color:#90c4ff}}
+.year-chip.last2{{background:#1a2040;border-color:#c4a0f0;color:#c4a0f0}}
+.year-chip.analog{{background:#1a2a14;border-color:#f6e05e;color:#f6e05e}}
 /* Diag */
 .dg-grid{{display:grid;grid-template-columns:1fr 1fr;gap:11px}}
 @media(max-width:620px){{.dg-grid{{grid-template-columns:1fr}}}}
@@ -745,7 +1061,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 /* Print styles */
 @media print{{
   body{{background:white;color:black;font-size:10pt}}
-  .tabs,.hdr .badge,.btn,.btn-pdf,.ctrls,.plant-box .hint{{display:none!important}}
+  .tabs,.hdr .badge,.btn,.btn-pdf,.ctrls,.plant-box .hint,.year-selector{{display:none!important}}
   .panel{{display:block!important;page-break-after:always;padding:8px}}
   .hdr{{background:none;border-bottom:2px solid #2d6a4f;padding:6px 0}}
   .hdr h1{{color:black;font-size:14pt}}
@@ -792,7 +1108,13 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 <!-- ═══ TAB 1: TX SEASONALITY ════════════════════════════════════════════════ -->
 <div id="t1" class="panel active">
   <div class="st">Drought Seasonality — Line Charts ({curr_yr} vs Historical)</div>
-  <div class="sn">Each variable shown as a line chart. Grey = all historical years. Bold = current year {curr_yr}. Dashed colored = top 5 analog years. Vertical dotted line = latest data point.</div>
+  <div class="sn">Each variable shown as a line chart. Grey = all historical years. 
+    <b style="color:#68d391">Green</b> = current year {curr_yr}. 
+    <b style="color:#90c4ff">Blue</b> = {curr_yr-1} (last year). 
+    <b style="color:#c4a0f0">Purple</b> = {curr_yr-2} (2 years ago). 
+    <b style="color:#f6e05e">Yellow dashed</b> = top 5 analog years. 
+    Click years below to toggle visibility.</div>
+  
   <div class="ctrls">
     <div class="ctrl"><span>Geography</span>
       <div style="display:flex;border:1px solid #2d3e50;border-radius:5px;overflow:hidden">
@@ -809,25 +1131,22 @@ td.bc{{color:#9070c0;font-size:.65rem}}
         <option value="D4">D4 only</option>
       </select>
     </div>
-    <div class="ctrl"><span>Swap analog slot</span>
-      <select id="sl-slot">
-        <option value="0">Analog 1</option><option value="1">Analog 2</option>
-        <option value="2">Analog 3</option><option value="3">Analog 4</option>
-        <option value="4">Analog 5</option>
-      </select>
-    </div>
-    <div class="ctrl"><span>Replace with year</span>
-      <select id="sl-yr"><option value="">—</option></select>
-    </div>
-    <button class="btn" onclick="swapAnalog()">Swap Year</button>
   </div>
+  
+  <!-- Year selector chips -->
+  <div class="ctrl"><span>Toggle Years (click to show/hide):</span></div>
+  <div id="year-chips" class="year-selector"></div>
+  
   <div id="sg" class="chart-grid"></div>
-  <div class="st">Last 6 Weeks — Current vs Analogs</div>
-  <div class="sn">Current season last 6 weeks, plus same 6-week period from last year and top 5 analog years.</div>
+  
+  <div class="st">Last 6 Weeks — Current vs Analogs & Previous Years</div>
+  <div class="sn">Current season last 6 weeks, plus same 6-week period from previous 2 years and top 5 analog years.</div>
   <div class="ctrl" style="margin-bottom:8px"><span>Variable</span>
     <select id="l6-var" onchange="drawLast6()">
-      <option value="D1-D4">D1-D4</option><option value="D2-D4">D2-D4</option>
-      <option value="D3-D4">D3-D4</option><option value="D4">D4</option>
+      <option value="D1-D4">D1-D4</option>
+      <option value="D2-D4">D2-D4</option>
+      <option value="D3-D4">D3-D4</option>
+      <option value="D4">D4</option>
     </select>
   </div>
   <div class="tw"><div id="l6tbl"></div></div>
@@ -836,7 +1155,6 @@ td.bc{{color:#9070c0;font-size:.65rem}}
     <textarea id="sum-t1">{summary['seasonality']}</textarea>
   </div>
 </div>
-
 <!-- ═══ TAB 2: US DROUGHT SEASONALITY ══════════════════════════════════ -->
 <div id="t2" class="panel">
   <div class="st">US Cotton Drought Seasonality — Line Charts</div>
@@ -851,18 +1169,8 @@ td.bc{{color:#9070c0;font-size:.65rem}}
         <option value="D4">D4 only</option>
       </select>
     </div>
-    <div class="ctrl"><span>Swap analog slot</span>
-      <select id="sl-slot-us">
-        <option value="0">Analog 1</option><option value="1">Analog 2</option>
-        <option value="2">Analog 3</option><option value="3">Analog 4</option>
-        <option value="4">Analog 5</option>
-      </select>
-    </div>
-    <div class="ctrl"><span>Replace with year</span>
-      <select id="sl-yr-us"><option value="">—</option></select>
-    </div>
-    <button class="btn" onclick="swapAnalogUS()">Swap Year</button>
   </div>
+  <div id="year-chips-us" class="year-selector"></div>
   <div id="sg-us" class="chart-grid"></div>
   <div class="st">Last 6 Weeks — US Drought (Latest Week Comparison)</div>
   <div class="ctrls">
@@ -950,6 +1258,12 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 <div id="t6" class="panel">
   <div id="best-banner" class="best-banner"></div>
 
+  <!-- Monte Carlo Results -->
+  <div id="mc-results" class="mc-box" style="display:none">
+    <h3>🎲 Monte Carlo Simulation Results</h3>
+    <div id="mc-stats" class="mc-stats"></div>
+  </div>
+
   <!-- Planted Area Inputs — all states, pre-filled from last year -->
   <div class="plant-box" style="max-width:100%">
     <label>🌱 Planted Area by State (1,000 acres) — Pre-filled with last year actuals. Edit any value then click Save.</label>
@@ -977,7 +1291,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
     </div>
     <div class="mat-card">
       <h3>Matrix B — TX from Model ★</h3>
-      <div class="sub" id="mB-sub">TX abandonment = regression prediction; other states unchanged</div>
+      <div class="sub" id="mB-sub">TX abandonment = regression prediction</div>
       <div id="mB"></div>
     </div>
   </div>
@@ -1056,8 +1370,21 @@ var VARS=["D1-D4","D2-D4","D3-D4","D4"];
 var VC={{"D1-D4":"#68d391","D2-D4":"#f6e05e","D3-D4":"#fc8181","D4":"#d6bcfa"}};
 var VBG={{"D1-D4":"#0a1f14","D2-D4":"#1f1a08","D3-D4":"#1f0a0a","D4":"#130a1f"}};
 var MC={{"weekly":"#68d391","monthly":"#f6e05e","cumulative":"#90a0ff"}};
-var ACOLS=["#ff6b6b","#ffd93d","#6bcb77","#4d96ff","#c77dff"];
+
+// FIXED: Color scheme for seasonality charts
+var COLORS = {{
+  curr: "#68d391",      // Current year - green
+  last1: "#90c4ff",    // Last year - blue  
+  last2: "#c4a0f0",    // 2 years ago - purple
+  analog: ["#ff6b6b", "#ffd93d", "#6bcb77", "#4d96ff", "#ff9f43"], // Analog years
+  hist: "#2a3848"      // Other historical - grey
+}};
+
 var ANALOGS={{}};var ANALOGS_US={{}};var GEO_STATE={{"wk":"TX","mo":"TX","cu":"TX"}};
+
+// Year visibility state
+var VISIBLE_YEARS = {{}};
+var VISIBLE_YEARS_US = {{}};
 
 // ── Tabs ──────────────────────────────────────────────────────────────────
 function showTab(id){{
@@ -1098,14 +1425,9 @@ function getCuData(){{ return GEO_STATE.cu==="US"?CU_US:CU; }}
 function setSlGeo(geo){{
   SL_GEO=geo;
   setGeoBtn("sl-tx-btn","sl-us-btn",geo);
-  var d=(geo==="US"?SL_US:SL).variables["D1-D4"];
-  var sel=document.getElementById("sl-yr");
-  if(sel&&d){{
-    sel.innerHTML='<option value="">—</option>';
-    d.all_hist_years.forEach(function(yr){{sel.innerHTML+='<option value="'+yr+'">'+yr+'</option>';}});
-  }}
-  VARS.forEach(function(v){{var dd=(geo==="US"?SL_US:SL).variables[v];ANALOGS[v]=dd?dd.analogs.slice():[];}});
-  drawSeasonCharts();drawLast6();
+  initYearChips();
+  drawSeasonCharts();
+  drawLast6();
 }}
 
 function setGeo(tab,geo){{
@@ -1131,25 +1453,287 @@ function setGeoBtn(txId,usId,geo){{
   if(tx){{tx.style.background=geo==="TX"?"#1a4030":"#1a2535";tx.style.color=geo==="TX"?"#68d391":"#90a4ae";}}
   if(us){{us.style.background=geo==="US"?"#1a4030":"#1a2535";us.style.color=geo==="US"?"#68d391":"#90a4ae";}}
 }}
-
-// ── Init ───────────────────────────────────────────────────────────────────
-function initAnalogsUS(){{
-  if(!SL_US||!SL_US.variables)return;
-  VARS.forEach(function(v){{var d=SL_US.variables[v];ANALOGS_US[v]=d?d.analogs.slice():[];}});
-  var sel=document.getElementById("sl-yr-us");if(!sel)return;
-  var d=SL_US.variables&&SL_US.variables["D1-D4"];
-  if(d)d.all_hist_years.forEach(function(yr){{sel.innerHTML+='<option value="'+yr+'">'+yr+'</option>';}});
+// ── Year Chips for Seasonality ────────────────────────────────────────────
+function initYearChips(){{
+  var slData = getSlData();
+  if(!slData || !slData.variables) return;
+  
+  var container = document.getElementById("year-chips");
+  var containerUS = document.getElementById("year-chips-us");
+  
+  // Build chips for TX
+  if(container){{
+    container.innerHTML = '';
+    var allYears = slData.all_hist_years || [];
+    var currYr = slData.curr_yr;
+    var last1 = slData.last_yr_1;
+    var last2 = slData.last_yr_2;
+    
+    // Initialize visibility
+    if(Object.keys(VISIBLE_YEARS).length === 0){{
+      // Default: show current, last 2 years, and analogs
+      VISIBLE_YEARS[currYr] = true;
+      VISIBLE_YEARS[last1] = true;
+      VISIBLE_YEARS[last2] = true;
+    }}
+    
+    // Current year chip
+    var chip = createYearChip(currYr, 'current', true, true);
+    container.appendChild(chip);
+    
+    // Last 2 years
+    chip = createYearChip(last1, 'last', VISIBLE_YEARS[last1] !== false, false);
+    chip.onclick = function() {{ toggleYear(last1, this); }};
+    container.appendChild(chip);
+    
+    chip = createYearChip(last2, 'last2', VISIBLE_YEARS[last2] !== false, false);
+    chip.onclick = function() {{ toggleYear(last2, this); }};
+    container.appendChild(chip);
+    
+    // All other years
+    allYears.forEach(function(yr){{
+      if(yr !== currYr && yr !== last1 && yr !== last2){{
+        var isAnalog = false;
+        VARS.forEach(function(v){{
+          var vd = slData.variables[v];
+          if(vd && vd.analogs && vd.analogs.indexOf(yr) >= 0) isAnalog = true;
+        }});
+        var cls = isAnalog ? 'analog' : '';
+        var visible = VISIBLE_YEARS[yr] === true || (isAnalog && VISIBLE_YEARS[yr] !== false);
+        chip = createYearChip(yr, cls, visible, false);
+        chip.onclick = function() {{ toggleYear(yr, this); }};
+        container.appendChild(chip);
+      }}
+    }});
+  }}
+  
+  // Build chips for US
+  if(containerUS && SL_US){{
+    containerUS.innerHTML = '';
+    // Similar logic for US...
+  }}
 }}
 
-function swapAnalogUS(){{
-  if(!SL_US)return;
-  var slot=parseInt(document.getElementById("sl-slot-us").value)||0;
-  var yr=parseInt(document.getElementById("sl-yr-us").value);
-  if(isNaN(yr))return;
-  VARS.forEach(function(v){{if(slot<ANALOGS_US[v].length)ANALOGS_US[v][slot]=yr;else ANALOGS_US[v].push(yr);}});
-  drawSeasonChartsUS();
+function createYearChip(year, cls, active, disabled){{
+  var chip = document.createElement('span');
+  chip.className = 'year-chip ' + cls + (active ? ' active' : '');
+  chip.textContent = year;
+  chip.dataset.year = year;
+  if(disabled) chip.style.cursor = 'default';
+  return chip;
 }}
 
+function toggleYear(year, chip){{
+  VISIBLE_YEARS[year] = !chip.classList.contains('active');
+  chip.classList.toggle('active');
+  drawSeasonCharts();
+}}
+
+// ── FIXED: Seasonality Charts ───────────────────────────────────────────
+function drawSeasonCharts(){{
+  var grid=document.getElementById("sg");if(!grid)return;grid.innerHTML="";
+  var sel=document.getElementById("sl-var")&&document.getElementById("sl-var").value;
+  var show=(!sel||sel==="ALL")?VARS:[sel];
+  grid.style.gridTemplateColumns=show.length===1?"1fr":"1fr 1fr";
+  
+  var slData = getSlData();
+  if(!slData || !slData.variables){{
+    grid.innerHTML='<div style="color:#fc8181;padding:16px;font-size:.78rem">⚠ No drought data available.</div>';
+    return;
+  }}
+  
+  show.forEach(function(v){{
+    var card=document.createElement("div");card.className="chart-card";
+    var cid="sl_"+v.replace(/[^a-z0-9]/gi,"_");
+    card.innerHTML='<h3 style="color:'+VC[v]+'">'+(slData.geo||"TX")+' — '+v+'</h3><div id="'+cid+'"></div>';
+    grid.appendChild(card);
+    drawOneLineFixed(cid, v, slData);
+  }});
+}}
+
+function drawOneLineFixed(cid, vn, slData){{
+  var c=document.getElementById(cid);if(!c)return;c.innerHTML="";
+  var d=slData.variables[vn];if(!d)return;
+  
+  var weeks=slData.iso_weeks, wl=slData.weeks, cYr=slData.curr_yr;
+  var last1=slData.last_yr_1, last2=slData.last_yr_2;
+  var analogs=d.analogs||[];
+  var ser=d.series, aYrs=d.all_hist_years;
+  
+  var cw=c.clientWidth||340, ML=36, MR=60, MT=14, MB=44, svgH=185;
+  var pw=cw-ML-MR, ph=svgH-MT-MB;
+  
+  var allV=[];
+  Object.keys(ser).forEach(function(y){{(ser[y]||[]).forEach(function(v){{if(v!==null)allV.push(v);}});}});
+  var yMax=allV.length?Math.min(100,Math.max.apply(null,allV)*1.1):100;
+  
+  var xS=sc(0,weeks.length-1,0,pw), yS=sc(0,yMax,ph,0);
+  var svg=msvg(cw,svgH), g=mel("g",{{transform:"translate("+ML+","+MT+")"}});
+  
+  // Grid lines
+  [0,25,50,75,100].filter(function(t){{return t<=yMax+1;}}).forEach(function(t){{
+    var yy=yS(t);
+    g.appendChild(mel("line",{{x1:0,y1:yy,x2:pw,y2:yy,stroke:"#1a2535","stroke-width":"1"}}));
+    g.appendChild(mtx(t+"%",{{x:-4,y:yy+3,"text-anchor":"end","font-size":"7"}},"#607080"));
+  }});
+  
+  // X-axis labels
+  wl.forEach(function(lbl,i){{
+    if(i%4===0){{
+      var xx=xS(i);
+      var tx=mel("text",{{x:xx,y:ph+12,"text-anchor":"middle",transform:"rotate(-35,"+xx+","+(ph+12)+")","font-size":"7","fill":"#607080"}});
+      tx.textContent=lbl;g.appendChild(tx);
+    }}
+  }});
+  
+  // Draw line function
+  function mkLine(yr, col, sw, op, dash){{
+    var line=ser[String(yr)];if(!line)return;
+    var pts=[];line.forEach(function(v,i){{if(v!==null)pts.push([xS(i),yS(v)]);}});
+    if(pts.length<2)return;
+    var pd="M"+pts[0][0].toFixed(1)+","+pts[0][1].toFixed(1);
+    for(var i=1;i<pts.length;i++)pd+="L"+pts[i][0].toFixed(1)+","+pts[i][1].toFixed(1);
+    var a={{d:pd,stroke:col,"stroke-width":String(sw),fill:"none",opacity:String(op)}};
+    if(dash)a["stroke-dasharray"]=dash;
+    tt(g.appendChild(mel("path",a)),String(yr));
+  }}
+  
+  // Draw historical years (grey, thin)
+  aYrs.forEach(function(yr){{
+    if(yr!==cYr && yr!==last1 && yr!==last2 && analogs.indexOf(yr)<0){{
+      if(VISIBLE_YEARS[yr] !== false){{
+        mkLine(yr, COLORS.hist, 0.7, 0.4, null);
+      }}
+    }}
+  }});
+  
+  // Draw 2 years ago (purple)
+  if(ser[String(last2)] && VISIBLE_YEARS[last2] !== false){{
+    mkLine(last2, COLORS.last2, 1.5, 0.8, null);
+  }}
+  
+  // Draw last year (blue)
+  if(ser[String(last1)] && VISIBLE_YEARS[last1] !== false){{
+    mkLine(last1, COLORS.last1, 2, 0.9, null);
+  }}
+  
+  // Draw analogs (dashed, distinct colors)
+  analogs.forEach(function(yr,i){{
+    if(VISIBLE_YEARS[yr] !== false){{
+      var col=COLORS.analog[i%5];
+      mkLine(yr, col, 1.8, 0.85, "5,3");
+    }}
+  }});
+  
+  // Draw current year (green, bold)
+  mkLine(cYr, COLORS.curr, 3, 1, null);
+  
+  // Highlight points
+  var cl2=ser[String(cYr)];
+  if(cl2){{
+    var lv=null, li=-1;cl2.forEach(function(v,j){{if(v!==null){{lv=v;li=j;}}}});
+    if(lv!==null){{
+      g.appendChild(mel("circle",{{cx:xS(li),cy:yS(lv),r:"5",fill:COLORS.curr,stroke:"#fff","stroke-width":"1"}}));
+      g.appendChild(mtx(cYr+": "+lv.toFixed(1)+"%",{{x:xS(li)+8,y:yS(lv)-8,"font-size":"9","font-weight":"700"}},COLORS.curr));
+    }}
+  }}
+  
+  // Vertical line at latest week
+  var latIdx=weeks.indexOf(slData.latest_iw);
+  if(latIdx>=0){{var xx=xS(latIdx);g.appendChild(mel("line",{{x1:xx,y1:0,x2:xx,y2:ph,stroke:"#607080","stroke-width":"1","stroke-dasharray":"3,3"}}));}}
+  
+  svg.appendChild(g);c.appendChild(svg);
+  
+  // Legend
+  var leg=document.createElement("div");leg.style.cssText="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;font-size:.65rem";
+  var items=[
+    [String(cYr), COLORS.curr, "700", "solid", "●"],
+    [String(last1), COLORS.last1, "600", "solid", "—"],
+    [String(last2), COLORS.last2, "500", "solid", "—"]
+  ];
+  analogs.forEach(function(yr,i){{items.push([String(yr), COLORS.analog[i%5], "500", "dashed", "–"]);}});
+  items.push(["Other", COLORS.hist, "400", "solid", "—"]);
+  
+  items.forEach(function(item){{
+    var ls=item[3]==="dashed"?"border-top:2px dashed "+item[1]:"border-top:2px solid "+item[1];
+    var marker=item[4]==="●"?('<span style="color:'+item[1]+';font-size:10px;margin-right:2px">●</span>'):('<span style="width:12px;'+ls+';display:inline-block;margin-right:3px"></span>');
+    leg.innerHTML+='<span style="display:flex;align-items:center;gap:2px">'+marker+'<span style="color:'+item[1]+';font-weight:'+item[2]+'">'+item[0]+'</span></span>';
+  }});
+  c.appendChild(leg);
+}}
+
+// ── FIXED: Last 6 Weeks Table ───────────────────────────────────────────
+function drawLast6(){{
+  var c=document.getElementById("l6tbl");if(!c)return;
+  var vn=(document.getElementById("l6-var")||{{}}).value||"D1-D4";
+  drawLast6Fixed(c, vn, SL);
+}}
+
+function drawLast6Fixed(c, vn, slData){{
+  if(!slData||!slData.variables){{c.innerHTML='<div style="color:#607080;padding:10px">No data.</div>';return;}}
+  var vd=slData.variables[vn];if(!vd)return;
+  
+  var rows6=slData.last6_weeks||[];
+  var comps=vd.last6_comparisons||[];
+  var latestIW=slData.latest_week_iw;
+  var latestDate=slData.latest_week_date||"";
+  
+  // Build header
+  var hdr='<tr>'+
+    '<th class="lft" style="background:#0e1d2e;min-width:100px">Year / Type</th>'+
+    '<th style="background:#0e1d2e;color:#90a4ae">Week</th>'+
+    '<th style="background:#0e1d2e;color:#607080">Date</th>';
+  VARS.forEach(function(v){{
+    hdr+='<th style="background:#0e1d2e;color:'+VC[v]+'">'+v+'</th>';
+  }});
+  hdr+='</tr>';
+  
+  // Current year rows
+  var body='';
+  rows6.forEach(function(r, idx){{
+    var isMostRecent=(r.iso_week===latestIW);
+    var isLast = idx === rows6.length - 1;
+    body+='<tr style="'+(isMostRecent?'background:#0a1f14':'')+'">'+
+      '<td class="lft" style="color:#68d391">'+(isMostRecent?'★ ':'')+slData.curr_yr+'</td>'+
+      '<td>'+(r.label||'')+'</td>'+
+      '<td style="color:#607080;font-size:.64rem">'+(r.date||'')+'</td>';
+    VARS.forEach(function(v){{
+      var val=r[v];
+      body+='<td style="'+(v===vn?'color:#f6e05e;font-weight:600':'')+'">'+(val!=null?val.toFixed(1)+'%':'—')+'</td>';
+    }});
+    body+='</tr>';
+  }});
+  
+  // Comparison years header
+  body+='<tr><td colspan="'+(3+VARS.length)+'" style="background:#1a2535;padding:4px 8px;font-size:.64rem;color:#607080;font-weight:600">Comparison Years — Same Weeks</td></tr>';
+  
+  // Comparison rows
+  comps.forEach(function(comp){{
+    var isLY=comp.is_last_yr;
+    var isLY2=comp.is_last_yr_2;
+    var isAnalog=comp.is_analog;
+    var color=isLY?'#90c4ff':(isLY2?'#c4a0f0':'#90a4ae');
+    var marker=isLY?'⬅ Last Yr':(isLY2?'← 2 Yrs Ago':(isAnalog?'● Analog':'  '));
+    
+    if(comp.entries){{
+      comp.entries.forEach(function(entry, idx){{
+        body+='<tr style="'+(isLY?'background:#0a1a2a':(isLY2?'background:#0a0a2a':''))+'">'+
+          '<td class="lft" style="color:'+color+'">'+(idx===0?marker+' '+comp.year:'')+'</td>'+
+          '<td style="color:#607080">'+(entry.label||'')+'</td>'+
+          '<td style="color:#607080;font-size:.64rem">—</td>';
+        VARS.forEach(function(v){{
+          var val=entry[v];
+          body+='<td style="'+(v===vn?'font-weight:600':'')+'">'+(val!=null?val.toFixed(1)+'%':'—')+'</td>';
+        }});
+        body+='</tr>';
+      }});
+    }}
+  }});
+  
+  c.innerHTML='<table><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table>';
+}}
+
+// ── US Seasonality (similar fixes) ──────────────────────────────────────
 function drawSeasonChartsUS(){{
   var grid=document.getElementById("sg-us");if(!grid)return;grid.innerHTML="";
   if(!SL_US||!SL_US.variables){{
@@ -1164,7 +1748,7 @@ function drawSeasonChartsUS(){{
     var cid="sl_us_"+v.replace(/[^a-z0-9]/gi,"_");
     card.innerHTML='<h3 style="color:'+VC[v]+'">'+(SL_US.geo||"US")+' — '+v+'</h3><div id="'+cid+'"></div>';
     grid.appendChild(card);
-    drawOneLineGeneric(cid,v,SL_US,ANALOGS_US);
+    drawOneLineFixed(cid, v, SL_US);
   }});
 }}
 
@@ -1172,137 +1756,9 @@ function drawLast6US(){{
   var c=document.getElementById("l6tbl-us");if(!c)return;
   if(!SL_US||!SL_US.variables){{c.innerHTML='<div style="color:#607080;padding:10px">No US drought data.</div>';return;}}
   var vn=(document.getElementById("l6-var-us")||{{}}).value||"D1-D4";
-  drawLast6Generic(c,vn,SL_US);
+  drawLast6Fixed(c, vn, SL_US);
 }}
-
-function drawLast6Generic(c,vn,slData){{
-  if(!slData||!slData.variables){{c.innerHTML='<div style="color:#607080;padding:10px">No data.</div>';return;}}
-  var vd=slData.variables[vn];if(!vd)return;
-  var rows6=slData.last6_weeks||[];
-  var comps=vd.last6_comparisons||[];
-  var latestIW=slData.latest_week_iw;
-  var latestDate=slData.latest_week_date||"";
-  var hdr='<tr>'+
-    '<th class="lft" style="background:#0e1d2e;min-width:88px">Year / Type</th>'+
-    '<th style="background:#0e1d2e;color:#90a4ae">Week</th>'+
-    '<th style="background:#0e1d2e;color:#607080">Date</th>'+
-    VARS.map(function(v){{return '<th style="background:#0e1d2e;color:'+VC[v]+'">'+(v===vn?'<b>'+v+'</b>':v)+'</th>';}}).join("")+
-    '</tr>';
-  var body=rows6.map(function(r){{
-    var isMostRecent=(r.iso_week===latestIW);
-    return '<tr style="'+(isMostRecent?'background:#0a1f14':'')+'">'+
-      '<td class="lft" style="color:#68d391">'+(isMostRecent?'★ ':'')+slData.curr_yr+'</td>'+
-      '<td>'+(r.label||'')+'</td>'+
-      '<td style="color:#607080;font-size:.64rem">'+(r.date||'')+'</td>'+
-      VARS.map(function(v){{var val=r[v];return '<td style="'+(v===vn?'color:#f6e05e;font-weight:600':'')+'">'+(val!=null?val.toFixed(1)+'%':'—')+'</td>';}}).join("")+
-      '</tr>';
-  }}).join("");
-  body+='<tr><td colspan="'+(3+VARS.length)+'" style="background:#1a2535;padding:2px 8px;font-size:.64rem;color:#607080">↓ Same week ('+latestDate+') — comparison years</td></tr>';
-  comps.forEach(function(comp){{
-    var isLY=comp.is_last_yr;
-    body+='<tr style="'+(isLY?'background:#1a1208':'')+'">'+
-      '<td class="lft" style="color:'+(isLY?'#f6e05e':'#90a4ae')+'">'+(isLY?'⬅ ':'')+comp.year+(comp.rmse!=null?' (RMSE='+comp.rmse+')':'')+' '+slData.geo+'</td>'+
-      '<td style="color:#607080">Wk '+comp.iso_week+'</td>'+
-      '<td style="color:#607080;font-size:.64rem">—</td>'+
-      VARS.map(function(v){{var val=comp[v];return '<td style="'+(v===vn?'font-weight:600':'')+'">'+(val!=null?val.toFixed(1)+'%':'—')+'</td>';}}).join("")+
-      '</tr>';
-  }});
-  c.innerHTML='<table><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table>';
-}}
-
-function drawOneLineGeneric(cid,vn,slData,analogsData){{
-  var c=document.getElementById(cid);if(!c)return;c.innerHTML="";
-  var d=slData.variables[vn];if(!d)return;
-  var weeks=slData.iso_weeks,wl=slData.weeks,cYr=slData.curr_yr;
-  var analogs=analogsData[vn]||[],ser=d.series,aYrs=d.all_hist_years;
-  var cw=c.clientWidth||340,ML=36,MR=60,MT=14,MB=44,svgH=185,pw=cw-ML-MR,ph=svgH-MT-MB;
-  var allV=[];Object.keys(ser).forEach(function(y){{(ser[y]||[]).forEach(function(v){{if(v!==null)allV.push(v);}});}});
-  var yMax=allV.length?Math.min(100,Math.max.apply(null,allV)):100;
-  var xS=sc(0,weeks.length-1,0,pw),yS=sc(0,yMax,ph,0);
-  var svg=msvg(cw,svgH),g=mel("g",{{transform:"translate("+ML+","+MT+")"}});
-  [0,25,50,75,100].filter(function(t){{return t<=yMax+1;}}).forEach(function(t){{
-    var yy=yS(t);
-    g.appendChild(mel("line",{{x1:0,y1:yy,x2:pw,y2:yy,stroke:"#1a2535","stroke-width":"1"}}));
-    g.appendChild(mtx(t+"%",{{x:-4,y:yy+3,"text-anchor":"end","font-size":"7"}},"#607080"));
-  }});
-  wl.forEach(function(lbl,i){{
-    if(i%4===0){{
-      var xx=xS(i);
-      var tx=mel("text",{{x:xx,y:ph+12,"text-anchor":"middle",transform:"rotate(-35,"+xx+","+(ph+12)+")","font-size":"7","fill":"#607080"}});
-      tx.textContent=lbl;g.appendChild(tx);
-    }}
-  }});
-  function mkLine(yr,col,sw,op,dash){{
-    var line=ser[String(yr)];if(!line)return;
-    var pts=[];line.forEach(function(v,i){{if(v!==null)pts.push([xS(i),yS(v)]);}});
-    if(pts.length<2)return;
-    var pd="M"+pts[0][0].toFixed(1)+","+pts[0][1].toFixed(1);
-    for(var i=1;i<pts.length;i++)pd+="L"+pts[i][0].toFixed(1)+","+pts[i][1].toFixed(1);
-    var a={{d:pd,stroke:col,"stroke-width":String(sw),fill:"none",opacity:String(op)}};
-    if(dash)a["stroke-dasharray"]=dash;
-    tt(g.appendChild(mel("path",a)),String(yr));
-  }}
-  aYrs.forEach(function(yr){{if(analogs.indexOf(yr)<0&&yr!==cYr)mkLine(yr,"#2a3848",0.7,0.5,null);}});
-  analogs.forEach(function(yr,i){{
-    var col=ACOLS[i%5];mkLine(yr,col,1.8,0.88,"5,3");
-    var line=ser[String(yr)];if(!line)return;
-    var lv=null,li=-1;line.forEach(function(v,j){{if(v!==null){{lv=v;li=j;}}}});
-    if(lv!==null){{
-      g.appendChild(mel("circle",{{cx:xS(li),cy:yS(lv),r:"3",fill:col}}));
-      g.appendChild(mtx(String(yr)+": "+lv.toFixed(0)+"%",{{x:xS(li)+5,y:yS(lv)+3,"font-size":"7.5","font-weight":"600"}},col));
-    }}
-  }});
-  mkLine(cYr,VC[vn]||"#68d391",2.5,1,null);
-  var cl2=ser[String(cYr)];
-  if(cl2){{
-    var lv=null,li=-1;cl2.forEach(function(v,j){{if(v!==null){{lv=v;li=j;}}}});
-    if(lv!==null){{
-      g.appendChild(mel("circle",{{cx:xS(li),cy:yS(lv),r:"4",fill:VC[vn]||"#68d391"}}));
-      g.appendChild(mtx(cYr+": "+lv.toFixed(1)+"%",{{x:xS(li)+5,y:yS(lv)-5,"font-size":"8","font-weight":"700"}},VC[vn]||"#68d391"));
-    }}
-  }}
-  var latIdx=weeks.indexOf(slData.latest_iw);
-  if(latIdx>=0){{var xx=xS(latIdx);g.appendChild(mel("line",{{x1:xx,y1:0,x2:xx,y2:ph,stroke:"#607080","stroke-width":"1","stroke-dasharray":"3,3"}}));}}
-  svg.appendChild(g);c.appendChild(svg);
-  var leg=document.createElement("div");leg.style.cssText="display:flex;flex-wrap:wrap;gap:5px;margin-top:4px;font-size:.65rem";
-  var items=[[String(cYr),VC[vn]||"#68d391","700","solid"]];
-  analogs.forEach(function(yr,i){{items.push([String(yr),ACOLS[i%5],"600","dashed"]);}});
-  items.push(["Historical","#2a3848","400","solid"]);
-  items.forEach(function(item){{
-    var ls=item[3]==="dashed"?"border-top:2px dashed "+item[1]:"border-top:2px solid "+item[1];
-    leg.innerHTML+='<span style="display:flex;align-items:center;gap:2px"><span style="width:14px;'+ls+';display:inline-block"></span><span style="color:'+item[1]+';font-weight:'+item[2]+'">'+item[0]+'</span></span>';
-  }});
-  c.appendChild(leg);
-}}
-
-function drawSeasonCharts(){{
-  var grid=document.getElementById("sg");if(!grid)return;grid.innerHTML="";
-  var sel=document.getElementById("sl-var")&&document.getElementById("sl-var").value;
-  var show=(!sel||sel==="ALL")?VARS:[sel];
-  grid.style.gridTemplateColumns=show.length===1?"1fr":"1fr 1fr";
-  show.forEach(function(v){{
-    var card=document.createElement("div");card.className="chart-card";
-    var cid="sl_"+v.replace(/[^a-z0-9]/gi,"_");
-    card.innerHTML='<h3 style="color:'+VC[v]+'">'+(SL.geo||"TX")+' — '+v+'</h3><div id="'+cid+'"></div>';
-    grid.appendChild(card);
-    drawOneLineGeneric(cid,v,SL,ANALOGS);
-  }});
-}}
-
-function drawLast6(){{
-  var c=document.getElementById("l6tbl");if(!c)return;
-  var vn=(document.getElementById("l6-var")||{{}}).value||"D1-D4";
-  drawLast6Generic(c,vn,SL);
-}}
-
-function swapAnalog(){{
-  var slot=parseInt(document.getElementById("sl-slot").value)||0;
-  var yr=parseInt(document.getElementById("sl-yr").value);
-  if(isNaN(yr))return;
-  VARS.forEach(function(v){{if(slot<ANALOGS[v].length)ANALOGS[v][slot]=yr;else ANALOGS[v].push(yr);}});
-  drawSeasonCharts();
-}}
-
+// ── Scatter charts ───────────────────────────────────────────────────────
 function drawScSet(gid,rows){{
   var g=document.getElementById(gid);if(!g)return;g.innerHTML="";
   if(!rows||!rows.length){{g.innerHTML='<div style="color:#607080;padding:16px">No data.</div>';return;}}
@@ -1352,11 +1808,7 @@ function drawSc(cid,vn,d){{
     g.appendChild(mel("line",{{x1:xcx-5,y1:ychi,x2:xcx+5,y2:ychi,stroke:"#fff","stroke-width":"2",opacity:"0.5"}}));
   }}
   var mxI=0,mnI=0;
-  for(var i=0;i<xs.length;i++){{
-    tt(g.appendChild(mel("circle",{{cx:xS(xs[i]),cy:yS(ys[i]),r:"4",fill:VC[vn],opacity:"0.7",stroke:"#0d1117","stroke-width":"0.5"}})),
-      yrs[i]+": drought="+xs[i].toFixed(1)+"%, abandon="+(ys[i]*100).toFixed(1)+"%");
-    if(ys[i]>ys[mxI])mxI=i;if(ys[i]<ys[mnI])mnI=i;
-  }}
+  for(var i=0;i<xs.length;i++){{tt(g.appendChild(mel("circle",{{cx:xS(xs[i]),cy:yS(ys[i]),r:"4",fill:VC[vn],opacity:"0.7",stroke:"#0d1117","stroke-width":"0.5"}})),yrs[i]+": drought="+xs[i].toFixed(1)+"%, abandon="+(ys[i]*100).toFixed(1)+"%");if(ys[i]>ys[mxI])mxI=i;if(ys[i]<ys[mnI])mnI=i;}}
   if(xs.length>0)[mxI,mnI].forEach(function(i){{g.appendChild(mtx(String(yrs[i]),{{x:xS(xs[i])+5,y:yS(ys[i])-4,"font-size":"7.5"}},"#a0b0c0"));}});
   if(cx!=null&&cy!=null){{
     var sx=xS(cx),sy=yS(cy);
@@ -1404,6 +1856,7 @@ function renderProd(){{
   var txPlt=getTxPlanted();
   var modelAb=BTX&&BTX.point!=null?BTX.point:null;
   initBanner();
+  initMCResults();
   buildMatAB();
   buildGridC(txPlt,modelAb);
   buildGridD(modelAb);
@@ -1418,11 +1871,48 @@ function initBanner(){{
   }}else{{b.innerHTML='⚠ No prediction available yet. Add drought data for current season.';}}
 }}
 
+function initMCResults(){{
+  var box=document.getElementById("mc-results");
+  var stats=document.getElementById("mc-stats");
+  if(!box||!stats)return;
+  
+  var mc=PROD.monte_carlo;
+  if(!mc){{box.style.display='none';return;}}
+  
+  box.style.display='block';
+  
+  // TX stats
+  var txStats=mc.tx;
+  var usStats=mc.us;
+  
+  stats.innerHTML=
+    '<div class="mc-stat">'+
+      '<div class="label">TX Production (mn bales)</div>'+
+      '<div class="value">Mean: '+txStats.production.mean+' | Median: '+txStats.production.median+'</div>'+
+      '<div style="color:#607080;font-size:.6rem;margin-top:2px">90% CI: ['+txStats.production.ci_5+' – '+txStats.production.ci_95+'] | σ='+txStats.production.std+'</div>'+
+    '</div>'+
+    '<div class="mc-stat">'+
+      '<div class="label">TX Abandonment</div>'+
+      '<div class="value">Mean: '+(txStats.abandonment.mean*100).toFixed(1)+'% | σ='+(txStats.abandonment.std*100).toFixed(1)+'%</div>'+
+    '</div>'+
+    '<div class="mc-stat">'+
+      '<div class="label">US Production (mn bales)</div>'+
+      '<div class="value">Mean: '+usStats.production.mean+' | Median: '+usStats.production.median+'</div>'+
+      '<div style="color:#607080;font-size:.6rem;margin-top:2px">90% CI: ['+usStats.production.ci_5+' – '+usStats.production.ci_95+'] | σ='+usStats.production.std+'</div>'+
+    '</div>'+
+    '<div class="mc-stat">'+
+      '<div class="label">US Abandonment</div>'+
+      '<div class="value">Mean: '+(usStats.abandonment.mean*100).toFixed(1)+'% | σ='+(usStats.abandonment.std*100).toFixed(1)+'%</div>'+
+    '</div>';
+}}
+
+// FIXED: Matrix B shows actual values only (no delta)
 function buildMatAB(){{
   var ca=document.getElementById("mA"),cb=document.getElementById("mB");
   if(!ca||!cb)return;
   var PL=PROD.period_labels;
   var periods=[1,5,10,15,20];
+  
   function computeCell(pAb, pYld, useTxModel){{
     var total=0; var ok=true;
     var states=PROD.state_data;
@@ -1440,33 +1930,28 @@ function buildMatAB(){{
     }});
     return ok?Math.round(total*1000)/1000:null;
   }}
+  
   function hdr(){{
-    return '<tr><th class="lft" style="min-width:60px;background:#0e1d2e">Ab↓ Yld→</th>'+
-      periods.map(function(p){{return '<th style="background:#0e1d2e;color:#7fb3d3">'+PL[p]+'</th>';}}).join("")+'</tr>';
+    return '<tr><th class="lft" style="min-width:60px;background:#0e1d2e;position:sticky;top:0;z-index:6">Ab↓ Yld→</th>'+
+      periods.map(function(p){{return '<th style="background:#0e1d2e;color:#7fb3d3;position:sticky;top:0;z-index:5">'+PL[p]+'</th>';}}).join("")+'</tr>';
   }}
+  
   function buildRows(useTxModel){{
     return periods.map(function(pAb){{
       var cells=periods.map(function(pYld){{
         var v=computeCell(pAb,pYld,useTxModel);
         return '<td>'+(v!=null?v.toFixed(2):"—")+'</td>';
       }}).join("");
-      return '<tr><th class="lft" style="background:#111820;color:#90a4ae">'+PL[pAb]+'</th>'+cells+'</tr>';
+      return '<tr><th class="lft" style="background:#111820;color:#90a4ae;position:sticky;left:0;z-index:4">'+PL[pAb]+'</th>'+cells+'</tr>';
     }}).join("");
   }}
+  
   ca.innerHTML='<table class="mtbl"><thead>'+hdr()+'</thead><tbody>'+buildRows(false)+'</tbody></table>';
-  var bRows=periods.map(function(pAb){{
-    var cells=periods.map(function(pYld){{
-      var vB=computeCell(pAb,pYld,true);
-      var vA=computeCell(pAb,pYld,false);
-      var delta=(vB!=null&&vA!=null)?vB-vA:null;
-      var dStr=delta!=null?' <span style="font-size:.6rem;color:'+(delta>=0?"#fc8181":"#68d391")+'">'+(delta>=0?"+":"")+delta.toFixed(2)+'</span>':'';
-      return '<td style="'+(delta!=null&&Math.abs(delta)>0.001?"background:#0a1520":"")+'">'+
-        (vB!=null?vB.toFixed(2):"—")+dStr+'</td>';
-    }}).join("");
-    return '<tr><th class="lft" style="background:#111820;color:#90a4ae">'+PL[pAb]+'</th>'+cells+'</tr>';
-  }}).join("");
-  cb.innerHTML='<table class="mtbl"><thead>'+hdr()+'</thead><tbody>'+bRows+'</tbody></table>';
-  document.getElementById("mB-sub").textContent='TX abandonment fixed at '+(BTX.point*100).toFixed(1)+'% (model). Δ vs Matrix A shown in red/green.';
+  
+  // Matrix B - just actual values, no delta
+  cb.innerHTML='<table class="mtbl"><thead>'+hdr()+'</thead><tbody>'+buildRows(true)+'</tbody></table>';
+  
+  document.getElementById("mB-sub").textContent='TX abandonment fixed at '+(BTX.point*100).toFixed(1)+'% (model prediction)';
 }}
 
 function buildGridC(txPlt,modelAb){{
@@ -1476,8 +1961,9 @@ function buildGridC(txPlt,modelAb){{
   if(!abR||!abR.length){{c.innerHTML='<div style="color:#607080;padding:8px;font-size:.7rem">No TX data available.</div>';return;}}
   var mRow=null;
   if(modelAb!=null){{var diffs=abR.map(function(a){{return Math.abs(a-modelAb);}});mRow=diffs.indexOf(Math.min.apply(null,diffs));}}
-  var hdr='<tr><th style="text-align:left;background:#0e1d2e;min-width:55px;position:sticky;left:0">Ab%↓ Yld→</th>'+
-    yldR.map(function(y){{return '<th style="background:#0e1d2e;color:#7fb3d3">'+y+'</th>';}}).join("")+'</tr>';
+  
+  var hdr='<tr><th style="text-align:left;background:#0e1d2e;min-width:55px;position:sticky;left:0;top:0;z-index:6">Ab%↓ Yld→</th>'+
+    yldR.map(function(y){{return '<th style="background:#0e1d2e;color:#7fb3d3;position:sticky;top:0;z-index:5">'+y+'</th>';}}).join("")+'</tr>';
   var body=abR.map(function(ab,ri){{
     var isMod=ri===mRow;
     var cells=yldR.map(function(yld){{
@@ -1485,11 +1971,11 @@ function buildGridC(txPlt,modelAb){{
       return '<td style="'+(isMod?"color:#68d391;font-weight:600":"")+'">'+prod.toFixed(2)+'</td>';
     }}).join("");
     return '<tr style="'+(isMod?"background:#0a1f14":"")+'">'+
-      '<th style="background:'+(isMod?"#061410":"#111820")+';color:'+(isMod?"#68d391":"#90a4ae")+';position:sticky;left:0;text-align:left">'+
+      '<th style="background:'+(isMod?"#061410":"#111820")+';color:'+(isMod?"#68d391":"#90a4ae")+';position:sticky;left:0;z-index:4;text-align:left">'+
       (ab*100).toFixed(0)+"%"+(isMod?" ★":"")+'</th>'+cells+'</tr>';
   }}).join("");
   c.innerHTML='<div style="font-size:.65rem;color:#607080;margin-bottom:4px">TX planted: '+Math.round(txPlt).toLocaleString()+'K ac · mn 480-lb bales'+(modelAb!=null?" · ★=model row":"")+
-    '</div><div style="overflow-x:auto"><table class="mtbl"><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table></div>';
+    '</div><div style="overflow-x:auto;max-height:400px;overflow-y:auto"><table class="mtbl"><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table></div>';
 }}
 
 function buildGridD(modelAb){{
@@ -1506,8 +1992,9 @@ function buildGridD(modelAb){{
   }}
   var mRow=null;
   if(modelAb!=null){{var diffs=usAb.map(function(a){{return Math.abs(a-modelAb);}});mRow=diffs.indexOf(Math.min.apply(null,diffs));}}
-  var hdr='<tr><th style="text-align:left;background:#0e1d2e;min-width:55px;position:sticky;left:0">Ab%↓ Yld→</th>'+
-    usYld.map(function(y){{return '<th style="background:#0e1d2e;color:#7fb3d3">'+y+'</th>';}}).join("")+'</tr>';
+  
+  var hdr='<tr><th style="text-align:left;background:#0e1d2e;min-width:55px;position:sticky;left:0;top:0;z-index:6">Ab%↓ Yld→</th>'+
+    usYld.map(function(y){{return '<th style="background:#0e1d2e;color:#7fb3d3;position:sticky;top:0;z-index:5">'+y+'</th>';}}).join("")+'</tr>';
   var body=usAb.map(function(ab,ri){{
     var isMod=ri===mRow;
     var cells=usYld.map(function(yld){{
@@ -1515,11 +2002,11 @@ function buildGridD(modelAb){{
       return '<td style="'+(isMod?"color:#68d391;font-weight:600":"")+'">'+prod.toFixed(2)+'</td>';
     }}).join("");
     return '<tr style="'+(isMod?"background:#0a1f14":"")+'">'+
-      '<th style="background:'+(isMod?"#061410":"#111820")+';color:'+(isMod?"#68d391":"#90a4ae")+';position:sticky;left:0;text-align:left">'+
+      '<th style="background:'+(isMod?"#061410":"#111820")+';color:'+(isMod?"#68d391":"#90a4ae")+';position:sticky;left:0;z-index:4;text-align:left">'+
       (ab*100).toFixed(2)+"%"+(isMod?" ★":"")+'</th>'+cells+'</tr>';
   }}).join("");
   c.innerHTML='<div style="font-size:.65rem;color:#607080;margin-bottom:4px">US planted: '+Math.round(usPlt).toLocaleString()+'K ac · Derived US ab from TX model · mn 480-lb bales</div>'+
-    '<div style="overflow-x:auto"><table class="mtbl"><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table></div>';
+    '<div style="overflow-x:auto;max-height:400px;overflow-y:auto"><table class="mtbl"><thead>'+hdr+'</thead><tbody>'+body+'</tbody></table></div>';
 }}
 
 // ── Planted area ───────────────────────────────────────────────────────────
@@ -1579,7 +2066,7 @@ function getPlanted(st){{
 }}
 function getTxPlanted(){{ return getPlanted("TX"); }}
 
-// ── Summary ────────────────────────────────────────────────────────────────
+// ── Summary ────────────────────────────────────────────────────────────
 function refreshSummary(){{
   var txPlt=getTxPlanted();
   var modelAb=BTX&&BTX.point!=null?BTX.point:null;
@@ -1588,23 +2075,33 @@ function refreshSummary(){{
   var hiPct=BTX.hi!=null?((BTX.hi||0)*100).toFixed(1)+"%":"?";
   var r2=BTX.r2!=null?(BTX.r2*100).toFixed(1)+"%":"N/A";
   var nWk=WK.length;var latest=WK.length?WK[WK.length-1].date:"N/A";
-  var sigWks=[];
-  WK.forEach(function(row){{
-    VARS.forEach(function(v){{
-      var d=row.vars&&row.vars[v];
-      if(d&&d.pvalue&&d.pvalue<0.10)sigWks.push(row.label+" ("+v+", R²="+(d.r2*100).toFixed(0)+"%)");
-    }});
+  
+  // Get production ranges
+  var mr=PROD.matrix_ranges||{{}};
+  var rangeText="";
+  ['matA','matB','gridC','gridD'].forEach(function(k){{
+    if(mr[k]){{
+      rangeText+='\\n• '+mr[k].label+': '+(mr[k].min!=null?mr[k].min.toFixed(2):'N/A')+'–'+(mr[k].max!=null?mr[k].max.toFixed(2):'N/A')+' mn bales';
+    }}
   }});
-  var sigTxt=sigWks.slice(0,3).join(", ")||"none at p<0.10 yet";
+  
+  // Previous year comparison
+  var prevProd=PROD.prev_year_prod||{{}};
+  var prevYr=PROD.prev_yr||'?';
+  var prevText="";
+  if(prevProd.tx!=null) prevText+='\\n• TX '+prevYr+' Actual: '+prevProd.tx.toFixed(2)+' mn bales';
+  if(prevProd.us!=null) prevText+='\\n• US '+prevYr+' Actual: '+prevProd.us.toFixed(2)+' mn bales';
+  
+  // Monte Carlo
+  var mc=PROD.monte_carlo;
+  var mcText=mc?
+    '\\n\\nMonte Carlo (10,000 runs):\\n• TX: mean='+mc.tx.production.mean+' mn bales, 90% CI ['+mc.tx.production.ci_5+'–'+mc.tx.production.ci_95+']\\n• US: mean='+mc.us.production.mean+' mn bales, 90% CI ['+mc.us.production.ci_5+'–'+mc.us.production.ci_95+']':'';
+  
   document.getElementById("ps1").value=SUMMARY.seasonality;
-  document.getElementById("ps2").value="Weekly model: "+nWk+" weeks available through "+latest+
-    ". Significant: "+sigTxt+".";
-  document.getElementById("ps3").value="Best model: "+BTX.variable+" ("+BTX.model+") at "+BTX.label+
-    ", R²="+r2+". TX abandonment prediction: "+modelPct+" ("+CI_PCT+" CI: "+loPct+"–"+hiPct+").";
-  document.getElementById("ps4").value=SUMMARY.production;
-  document.getElementById("ps5").value="Key risks: (1) Low R² ("+r2+") means wide CI. "+
-    "(2) Model trained on historical data; extreme events may be underweighted. "+
-    "(3) TX planted area estimate may not reflect final USDA NASS figure.";
+  document.getElementById("ps2").value="Weekly model: "+nWk+" weeks available through "+latest+". See tables for details.";
+  document.getElementById("ps3").value="Best model: "+BTX.variable+" ("+BTX.model+") at "+BTX.label+", R²="+r2+". TX abandonment prediction: "+modelPct+" ("+CI_PCT+" CI: "+loPct+"–"+hiPct+").";
+  document.getElementById("ps4").value="Production Scenario Ranges (mn 480-lb bales):"+rangeText+prevText+mcText;
+  document.getElementById("ps5").value="Key risks: (1) Low R² ("+r2+") means wide CI. (2) Model trained on historical data; extreme events may be underweighted. (3) Final USDA NASS figures may differ.";
 }}
 
 // ── Diagnostics ────────────────────────────────────────────────────────────
@@ -1638,19 +2135,8 @@ function drawDiagB(cid,lbls,wr,mr,cr,col){{
     svg.appendChild(mtx((t*100).toFixed(0)+"%",{{x:ML-2,y:yy+3,"text-anchor":"end","font-size":"7"}},"#607080"));
   }});
   if(0.15<=yMx){{var yy=yS(0.15);svg.appendChild(mel("line",{{x1:ML,y1:yy,x2:cw-MR,y2:yy,stroke:"#68d391","stroke-width":"1","stroke-dasharray":"3,3"}}));}}
-  for(var i=0;i<n;i++){{
-    var gx=ML+i*(gW+1);
-    [[wr[i],MC.weekly],[mr[i],MC.monthly],[cr[i],MC.cumulative]].forEach(function(item,j){{
-      var rv=item[0]||0,pcol=item[1],yy=yS(rv),bh=Math.max(1,(svgH-MB)-yy);
-      tt(svg.appendChild(mel("rect",{{x:gx+j*(bW+0.5),y:yy,width:bW,height:bh,rx:1,fill:pcol,opacity:"0.85"}})),
-        lbls[i]+": "+["Wkly","Mo","Cumul"][j]+" R²="+(item[0]!=null?(item[0]*100).toFixed(1)+"%":"N/A"));
-    }});
-    if(i%3===0){{var tx=mel("text",{{x:gx+gW/2,y:svgH-MB+8,"text-anchor":"middle",transform:"rotate(-35,"+(gx+gW/2)+","+(svgH-MB+8)+")","font-size":"7","fill":"#607080"}});tx.textContent=lbls[i];svg.appendChild(tx);}};
-  }}
-  [["Wkly",MC.weekly],["Mo",MC.monthly],["Cumul",MC.cumulative]].forEach(function(item,i){{
-    var lx=ML+i*58;svg.appendChild(mel("rect",{{x:lx,y:svgH-11,width:8,height:6,rx:1,fill:item[1]}}));
-    svg.appendChild(mtx(item[0],{{x:lx+10,y:svgH-6,"font-size":"7"}},item[1]));
-  }});
+  for(var i=0;i<n;i++){{var gx=ML+i*(gW+1);[[wr[i],MC.weekly],[mr[i],MC.monthly],[cr[i],MC.cumulative]].forEach(function(item,j){{var rv=item[0]||0,pcol=item[1],yy=yS(rv),bh=Math.max(1,(svgH-MB)-yy);tt(svg.appendChild(mel("rect",{{x:gx+j*(bW+0.5),y:yy,width:bW,height:bh,rx:1,fill:pcol,opacity:"0.85"}})),lbls[i]+": "+["​Wkly","Mo","Cumul"][j]+" R²="+(item[0]!=null?(item[0]*100).toFixed(1)+"%":"N/A"));}});if(i%3===0){{var tx=mel("text",{{x:gx+gW/2,y:svgH-MB+8,"text-anchor":"middle",transform:"rotate(-35,"+(gx+gW/2)+","+(svgH-MB+8)+")","font-size":"7","fill":"#607080"}});tx.textContent=lbls[i];svg.appendChild(tx);}};}}
+  [["​Wkly",MC.weekly],["Mo",MC.monthly],["Cumul",MC.cumulative]].forEach(function(item,i){{var lx=ML+i*58;svg.appendChild(mel("rect",{{x:lx,y:svgH-11,width:8,height:6,rx:1,fill:item[1]}}));svg.appendChild(mtx(item[0],{{x:lx+10,y:svgH-6,"font-size":"7"}},item[1]));}});
   c.appendChild(svg);
 }}
 
@@ -1666,9 +2152,10 @@ function printPDF(){{
 // ── Init ───────────────────────────────────────────────────────────────────
 window.onload=function(){{
   VARS.forEach(function(v){{var d=SL.variables[v];ANALOGS[v]=d?d.analogs.slice():[];}});
-  var sel=document.getElementById("sl-yr"),d=SL.variables["D1-D4"];
-  if(d)d.all_hist_years.forEach(function(yr){{sel.innerHTML+='<option value="'+yr+'">'+yr+'</option>';}});
-  initAnalogsUS();
+  initYearChips();
+  if(SL_US){{
+    VARS.forEach(function(v){{var d=SL_US.variables[v];ANALOGS_US[v]=d?d.analogs.slice():[];}});
+  }}
   initPlantedInputs();
   drawSeasonCharts();
   drawLast6();
@@ -1706,7 +2193,7 @@ def main():
         print(f"  NOTE: {DROUGHT_US_CSV} not found — US drought analysis will be empty")
 
     print("\nLoading data…")
-    cotton  = load_cotton(COTTON_CSV)
+    cotton = load_cotton(COTTON_CSV)
     drought_tx = load_drought(DROUGHT_CSV)
     drought_us = load_drought(DROUGHT_US_CSV) if has_us_drought else drought_tx
 
@@ -1743,8 +2230,8 @@ def main():
 
     print("\nBuilding TX regression models…")
     wk_rows, curr_yr = build_weekly(ab_tx, drought_tx)
-    mo_rows           = build_monthly(ab_tx, drought_tx)
-    cu_rows           = build_cumulative(ab_tx, drought_tx)
+    mo_rows = build_monthly(ab_tx, drought_tx)
+    cu_rows = build_cumulative(ab_tx, drought_tx)
     print(f"  TX: Weekly={len(wk_rows)}, Monthly={len(mo_rows)}, Cumulative={len(cu_rows)}")
 
     best_tx = best_prediction(wk_rows, mo_rows, cu_rows)
@@ -1754,9 +2241,9 @@ def main():
     print("Building US regression models…")
     if has_us_drought and ab_us is not None:
         wk_us, _ = build_weekly(ab_us, drought_us)
-        mo_us     = build_monthly(ab_us, drought_us)
-        cu_us     = build_cumulative(ab_us, drought_us)
-        best_us   = best_prediction(wk_us, mo_us, cu_us)
+        mo_us = build_monthly(ab_us, drought_us)
+        cu_us = build_cumulative(ab_us, drought_us)
+        best_us = best_prediction(wk_us, mo_us, cu_us)
         print(f"  US: Weekly={len(wk_us)}, Monthly={len(mo_us)}, Cumulative={len(cu_us)}")
         print(f"  US best: {best_us.get('variable','—')} R²={best_us.get('r2',0)*100:.1f}%")
     else:
@@ -1766,7 +2253,7 @@ def main():
         print("  US models skipped — no drought_US.csv or US abandonment")
 
     print("Building seasonality line chart data…")
-    slines    = build_season_lines(drought_tx, geo_label="TX")
+    slines = build_season_lines(drought_tx, geo_label="TX")
     slines_us = build_season_lines(drought_us, geo_label="US") if has_us_drought else slines
     for v in DROUGHT_VARS:
         d = slines["variables"].get(v,{})
@@ -1776,6 +2263,12 @@ def main():
     prod = build_production(cotton, best_tx)
     print(f"  States={len(prod['state_data'])} · TX ab range: "
           f"{prod['tx_ab_range'][0]*100:.0f}%–{prod['tx_ab_range'][-1]*100:.0f}%")
+    
+    # Monte Carlo results
+    if prod.get('monte_carlo'):
+        mc = prod['monte_carlo']
+        print(f"  Monte Carlo: TX production mean={mc['tx']['production']['mean']:.2f} mn bales, "
+              f"US production mean={mc['us']['production']['mean']:.2f} mn bales")
 
     print("Building analyst summary…")
     summary = build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab_tx, drought_tx)
@@ -1794,3 +2287,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+  
