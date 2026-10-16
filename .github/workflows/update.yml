@@ -2,6 +2,8 @@ name: Update Cotton Drought Dashboard
 
 on:
   schedule:
+    - cron: "30 15 * * 4"   # Thursday: new Drought Monitor week on Ag in Drought
+    - cron: "30 14 * * 5"   # Friday catch-up
     - cron: "0 14 * * 2"
   workflow_dispatch:
   push:
@@ -51,6 +53,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Refresh cotton-area drought (USDA/NDMC Ag in Drought)
+        run: python scripts/fetch_drought.py || echo "drought refresh failed; using files in data/"
+
       - name: Ensure docs folder exists
         run: |
           mkdir -p docs
@@ -66,7 +71,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/index.html docs/.nojekyll
+          git add docs/index.html docs/model.json docs/.nojekyll data/drought_texas.csv data/drought_US.csv
           
           # Only commit if there are changes
           if git diff --cached --quiet; then
@@ -81,8 +86,8 @@ jobs:
           git merge origin/main --strategy-option=ours || true
           
           # If merge failed, force our version
-          git checkout --ours docs/index.html || true
-          git add docs/index.html || true
+          git checkout --ours docs/index.html docs/model.json || true
+          git add docs/index.html docs/model.json || true
           git commit -m "resolve: merge conflict keep regenerated dashboard" || true
           
           git push origin main

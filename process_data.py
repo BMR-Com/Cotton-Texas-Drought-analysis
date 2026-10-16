@@ -538,9 +538,60 @@ def build_production(cotton, best_tx):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 5b. CROP PREDICTION FROM THE HIGHEST-R² MODEL
+# ═══════════════════════════════════════════════════════════════════════════
+NASS_ANNUAL_URL = "https://raw.githubusercontent.com/BMR-Com/cotton-crop-progress/main/data/ginning/annual.csv"
+
+
+def crop_prediction(best_tx, curr_yr):
+    """US upland crop with Texas abandonment from the highest-R² drought model.
+
+    Texas: NASS planted acres × (1 − model abandonment) × NASS's latest Texas yield.
+    Other states: NASS's latest production forecast. Range: ±1σ of the model's prediction error
+    (the 90% interval it reports, rescaled to one standard deviation)."""
+    import os
+    try:
+        src = os.environ.get("NASS_ANNUAL_LOCAL") or NASS_ANNUAL_URL
+        a = pd.read_csv(src)
+    except Exception as e:
+        print("  NASS state forecasts unavailable:", e)
+        return None
+    a = a[(a.year == curr_yr) & (a.period == "YEAR")]
+    if a.empty or best_tx.get("point") is None:
+        return None
+    g = a.pivot_table(index="state", columns="item", values="value", aggfunc="last")
+    tx = g.loc["TX"]
+    us_prod = float(g.loc["US", "upland_prod"]) if "US" in g.index else float(g.drop(index="US", errors="ignore").upland_prod.sum())
+    pl, yld, usda_tx = float(tx.upland_planted), float(tx.upland_yield), float(tx.upland_prod)
+    usda_ab = 1 - usda_tx * 480 / yld / pl
+    others = us_prod - usda_tx
+    n = len(best_tx.get("scatter_years") or []) or 25
+    tq = stats.t.ppf((1 + CI_LEVEL) / 2, df=max(n - 2, 1))
+    sd = (best_tx["hi"] - best_tx["lo"]) / (2 * tq) if best_tx.get("hi") is not None else None
+
+    def tx_prod(ab):
+        return pl * (1 - ab) * yld / 480
+    ab = best_tx["point"]
+    out = {"year": int(curr_yr), "tx_ab": ab, "tx_ab_sd": sd, "tx_ab_usda": usda_ab, "tx_planted": pl, "tx_yield": yld,
+           "tx_prod": tx_prod(ab), "tx_prod_usda": usda_tx, "others_prod_usda": others,
+           "us_prod": tx_prod(ab) + others, "us_prod_usda": us_prod,
+           "model": f"{best_tx.get('variable')} {best_tx.get('model')}", "r2": best_tx.get("r2")}
+    if sd:
+        out["tx_ab_lo"], out["tx_ab_hi"] = max(ab - sd, 0), min(ab + sd, 0.95)
+        out["us_prod_lo"] = tx_prod(out["tx_ab_hi"]) + others
+        out["us_prod_hi"] = tx_prod(out["tx_ab_lo"]) + others
+    if "pima_prod" in g.columns:
+        out["pima_usda"] = float(g.loc["US", "pima_prod"]) if "US" in g.index else float(g.pima_prod.sum())
+        out["all_prod"] = out["us_prod"] + out["pima_usda"]
+    print(f"  Crop (best model {out['model']}, R²={out['r2']*100:.1f}%): TX ab {ab*100:.1f}% "
+          f"(USDA {usda_ab*100:.1f}%) → US upland {out['us_prod']/1e6:.2f}m vs USDA {us_prod/1e6:.2f}m")
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 6. ANALYST SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════
-def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought):
+def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought, crop=None):
     """Auto-generate summary text for each section."""
     curr_yr = best_tx.get("curr_yr","?")
     model_ab = best_tx.get("point")
@@ -597,7 +648,11 @@ def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought)
             f"({CI_LEVEL*100:.0f}% CI: {lo_pct}–{hi_pct}) via {best_tx.get('variable','—')} "
             f"{best_tx.get('model','—')} model at {latest_lbl}. "
             f"Historical TX abandonment: mean={ab_mean}, std={ab_std}, range={ab_min}–{ab_max}. "
-            f"{prod_note}"
+            + (f"Crop from this model: US upland {crop['us_prod']/1e6:.2f}m bales "
+               f"(±1σ {crop['us_prod_lo']/1e6:.2f}–{crop['us_prod_hi']/1e6:.2f}m) vs USDA {crop['us_prod_usda']/1e6:.2f}m; "
+               f"Texas {crop['tx_prod']/1e6:.2f}m on {crop['tx_planted']/1e6:.2f}m planted at USDA's {crop['tx_yield']:.0f} lb yield "
+               f"(USDA implies {crop['tx_ab_usda']*100:.1f}% abandonment). " if crop and crop.get("us_prod_lo") else "")
+            + f"{prod_note}"
         ),
     }
     return sections
@@ -607,7 +662,7 @@ def build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab, drought)
 # 7. HTML
 # ═══════════════════════════════════════════════════════════════════════════
 def make_html(wk_rows, mo_rows, cu_rows, slines, prod, best_tx, summary, cotton_ab, drought,
-              us_wk, us_mo, us_cu, us_slines, us_best, ci_pct):
+              us_wk, us_mo, us_cu, us_slines, us_best, ci_pct, crop=None):
 
     curr_yr   = wk_rows[0]["curr_yr"] if wk_rows else "?"
     ab        = cotton_ab
@@ -615,6 +670,8 @@ def make_html(wk_rows, mo_rows, cu_rows, slines, prod, best_tx, summary, cotton_
     n_wk      = len(wk_rows)
     latest_wk = wk_rows[-1]["date"] if wk_rows else "—"
     model_ab_pct = f"{best_tx.get('point',0)*100:.1f}%" if best_tx.get("point") else "N/A"
+    crop_txt = (f" → US upland crop <b>{crop['us_prod']/1e6:.2f}m bales</b> (±1σ {crop['us_prod_lo']/1e6:.2f}–{crop['us_prod_hi']/1e6:.2f}m; "
+                f"USDA {crop['us_prod_usda']/1e6:.2f}m)") if crop and crop.get("us_prod_lo") else ""
 
     j_us_wk  = jd(us_wk)
     j_us_mo  = jd(us_mo)
@@ -769,7 +826,7 @@ td.bc{{color:#9070c0;font-size:.65rem}}
 <div class="hdr">
   <div>
     <h1>🌾 TX Cotton · Drought Abandonment Predictor + Production Estimator · MY {curr_yr}/{str(int(curr_yr)+1)[-2:]}</h1>
-    <p>{n_wk} weeks available through {latest_wk} · Best model: {best_tx.get('variable','—')} ({best_tx.get('model','—')}) R²={best_tx.get('r2',0)*100:.1f}% → TX abandonment {model_ab_pct}</p>
+    <p>{n_wk} weeks available through {latest_wk} · Best model: {best_tx.get('variable','—')} ({best_tx.get('model','—')}) R²={best_tx.get('r2',0)*100:.1f}% → TX abandonment {model_ab_pct}{crop_txt}</p>
   </div>
   <div style="display:flex;gap:8px;align-items:center">
     <button class="btn-pdf" onclick="printPDF()">🖨 Print / PDF</button>
@@ -2045,16 +2102,22 @@ def main():
           f"{prod['tx_ab_range'][0]*100:.0f}%–{prod['tx_ab_range'][-1]*100:.0f}%")
 
     print("Building analyst summary…")
-    summary = build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab_tx, drought_tx)
+    crop = crop_prediction(best_tx, curr_yr)
+    summary = build_analyst_summary(best_tx, wk_rows, mo_rows, cu_rows, prod, ab_tx, drought_tx, crop)
 
     ci_pct = str(int(CI_LEVEL*100))
     print(f"\nGenerating HTML ({ci_pct}% CI)…")
     OUTPUT_HTML.parent.mkdir(exist_ok=True)
     html = make_html(
         wk_rows, mo_rows, cu_rows, slines, prod, best_tx, summary, ab_tx, drought_tx,
-        wk_us, mo_us, cu_us, slines_us, best_us, ci_pct
+        wk_us, mo_us, cu_us, slines_us, best_us, ci_pct, crop
     )
     OUTPUT_HTML.write_text(html, encoding="utf-8")
+    # machine-readable output for the BMR-Com Production model tab
+    model_json = {"generated": pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M UTC"), "latest_week": wk_rows[-1]["date"] if wk_rows else None,
+                  "tx_best": best_tx, "us_best": best_us, "crop": crop,
+                  "WK": wk_rows, "CU": cu_rows, "MO": mo_rows, "WK_US": wk_us, "CU_US": cu_us, "MO_US": mo_us}
+    (OUTPUT_HTML.parent / "model.json").write_text(json.dumps(model_json, separators=(",", ":"), default=lambda o: None), encoding="utf-8")
     print(f"\n✓ Done → {OUTPUT_HTML} ({OUTPUT_HTML.stat().st_size//1024} KB)")
     print("\nOpen docs/index.html in any browser.")
 
